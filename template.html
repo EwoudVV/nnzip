@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LLM-Compressed File</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+         max-width: 720px; margin: 2em auto; padding: 0 1em; line-height: 1.5;
+         color: #222; background: #fafafa; }
+  h1 { font-size: 1.3em; }
+  .box { background: #fff; border: 1px solid #ddd; border-radius: 6px;
+         padding: 1em; margin: 1em 0; }
+  input[type=password] { width: 100%; padding: 0.5em; font-size: 1em;
+         font-family: monospace; border: 1px solid #ccc; border-radius: 4px;
+         box-sizing: border-box; }
+  button { padding: 0.5em 1em; font-size: 1em; cursor: pointer;
+           border: 1px solid #888; border-radius: 4px; background: #eee; }
+  button:hover { background: #ddd; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  pre { background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto;
+        font-size: 0.9em; }
+  #output { white-space: pre-wrap; word-wrap: break-word; }
+  .status { color: #555; font-size: 0.9em; }
+  .meta { color: #888; font-size: 0.85em; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+<h1>LLM-Compressed File</h1>
+<p>This page contains an English text file compressed using GPT-3.5 as a
+probability model. To extract it, paste an OpenAI API key (yours stays in
+your browser; <a href="view-source:" onclick="return false">view source</a>
+to verify).</p>
+
+<div class="box">
+  <p><strong>Your OpenAI API key:</strong></p>
+  <input id="apiKey" type="password" placeholder="sk-...">
+  <p style="margin-top: 1em;">
+    <button id="goBtn">Decompress</button>
+    <span class="meta" id="cost">(approx cost: $__APPROX_COST__, ~__APPROX_TIME__s)</span>
+  </p>
+  <p class="status" id="status">Ready.</p>
+</div>
+
+<div class="box" id="outBox" style="display:none">
+  <p><strong>Decompressed content:</strong>
+    <button id="dlBtn" style="float:right">Download</button>
+  </p>
+  <pre id="output"></pre>
+</div>
+
+<details>
+  <summary class="meta">How does this work?</summary>
+  <p class="meta">Both you and the sender's machine query GPT-3.5 for its
+  top-5 most likely next tokens at each position. The compressed payload only
+  records which rank (0-4 or "not in top-5") the real next token had -- a
+  handful of bits per token. When the real token wasn't in the top-5, we also
+  embed it as a literal string. Reconstructing the file requires the same
+  model and an API key; the content itself is not encrypted.</p>
+</details>
+
+<script>
+"use strict";
+
+// --- baked in by the compressor ----------------------------------------
+const PAYLOAD_B64 = "__PAYLOAD_B64__";
+const FIXED_RANK_CDF = __FIXED_RANK_CDF__;
+const CDF_TOTAL = __CDF_TOTAL__;
+const TOP_K = __TOP_K__;
+const MODEL = "__MODEL__";
+// -----------------------------------------------------------------------
+
+// --- portable arithmetic decoder (matches arithmetic_coder.py) ---------
+const PRECISION = 32;
+const TOP = 4294967296;       // 2^32
+const HALF = 2147483648;      // 2^31
+const QUARTER = 1073741824;   // 2^30
+const THREE_QUARTER = 3221225472;
+const MASK = TOP - 1;
+
+class ArithmeticDecoder {
+  constructor(bytes, bitCount) {
+    this.bytes = bytes;
+    this.bitCount = bitCount;
+    this.pos = 0;
+    this.low = 0;
+    this.high = MASK;
+    this.value = 0;
+    for (let i = 0; i < PRECISION; i++) {
+      this.value = (this.value * 2 + this._readBit()) % TOP;
+    }
+  }
+
+  _readBit() {
+    if (this.pos >= this.bitCount) return 0;
+    const byteIdx = this.pos >>> 3;
+    const bitIdx = 7 - (this.pos & 7);
+    this.pos++;
+    return (this.bytes[byteIdx] >>> bitIdx) & 1;
+  }
+
+  _renormalize(cdfLow, cdfHigh, total) {
+    const rng = this.high - this.low + 1;
+    this.high = this.low + Math.floor((rng * cdfHigh) / total) - 1;
+    this.low = this.low + Math.floor((rng * cdfLow) / total);
+
+    while (true) {
+      if (this.high < HALF) {
+        // emit nothing on decode
+      } else if (this.low >= HALF) {
+        this.value -= HALF;
+        this.low -= HALF;
+        this.high -= HALF;
+      } else if (this.low >= QUARTER && this.high < THREE_QUARTER) {
+        this.value -= QUARTER;
+        this.low -= QUARTER;
+        this.high -= QUARTER;
+      } else {
+        break;
+      }
+      this.low = (this.low * 2) % TOP;
+      this.high = ((this.high * 2) + 1) % TOP;
+      this.value = ((this.value * 2) + this._readBit()) % TOP;
+    }
+  }
+
+  decodeCdf(cdf, total) {
+    const rng = this.high - this.low + 1;
+    const v = Math.floor(((this.value - this.low + 1) * total - 1) / rng);
+    let s = 0;
+    while (s + 1 < cdf.length && cdf[s + 1] <= v) s++;
+    this._renormalize(cdf[s], cdf[s + 1], total);
+    return s;
+  }
+
+  decodeUniform(total) {
+    const rng = this.high - this.low + 1;
+    const s = Math.floor(((this.value - this.low + 1) * total - 1) / rng);
+    this._renormalize(s, s + 1, total);
+    return s;
+  }
+}
+
+// --- helpers ------------------------------------------------------------
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function readU32BE(bytes, off) {
+  return bytes[off] * 16777216 + bytes[off + 1] * 65536 +
+         bytes[off + 2] * 256 + bytes[off + 3];
+}
+function readU16BE(bytes, off) {
+  return bytes[off] * 256 + bytes[off + 1];
+}
+
+function utf8Decode(bytes) {
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+function parsePayload(bytes) {
+  let off = 0;
+  const tokenCount = readU32BE(bytes, off); off += 4;
+  const literalCount = readU16BE(bytes, off); off += 2;
+  const literalSeqCount = readU16BE(bytes, off); off += 2;
+  const literalTable = [];
+  for (let i = 0; i < literalCount; i++) {
+    const len = bytes[off]; off += 1;
+    literalTable.push(utf8Decode(bytes.subarray(off, off + len)));
+    off += len;
+  }
+  const acBitCount = readU32BE(bytes, off); off += 4;
+  const acBytes = bytes.subarray(off);
+  return { tokenCount, literalTable, literalSeqCount, acBitCount, acBytes };
+}
+
+// Reproduce the encoder's sort: by quantized logprob DESC (2 decimals),
+// tiebreak by string ASC.
+function sortedTopStrings(topLp) {
+  const items = Object.entries(topLp).map(([s, lp]) => [s, Math.round(lp * 100) / 100]);
+  items.sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return items.map((x) => x[0]);
+}
+
+async function callOpenAI(apiKey, promptText) {
+  const resp = await fetch("https://api.openai.com/v1/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      prompt: promptText,
+      max_tokens: 1,
+      logprobs: TOP_K,
+      temperature: 0,
+      seed: 42,
+      echo: false,
+    }),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error("API error " + resp.status + ": " + txt);
+  }
+  const data = await resp.json();
+  return data.choices[0].logprobs.top_logprobs[0];
+}
+
+async function decompress(apiKey, onProgress) {
+  const bytes = base64ToBytes(PAYLOAD_B64);
+  const parsed = parsePayload(bytes);
+  const dec = new ArithmeticDecoder(parsed.acBytes, parsed.acBitCount);
+  const tableSize = Math.max(2, parsed.literalTable.length);
+
+  const out = [];
+  // Position 0: read literal index
+  const idx0 = dec.decodeUniform(tableSize);
+  out.push(parsed.literalTable[idx0]);
+  onProgress(1, parsed.tokenCount);
+
+  for (let i = 1; i < parsed.tokenCount; i++) {
+    const prefixText = out.join("");
+    const topLp = await callOpenAI(apiKey, prefixText);
+    const ordered = sortedTopStrings(topLp);
+
+    const r = dec.decodeCdf(FIXED_RANK_CDF, CDF_TOTAL);
+    if (r < TOP_K) {
+      out.push(ordered[r]);
+    } else {
+      const idx = dec.decodeUniform(tableSize);
+      out.push(parsed.literalTable[idx]);
+    }
+    onProgress(i + 1, parsed.tokenCount);
+  }
+
+  return out.join("");
+}
+
+// --- UI -----------------------------------------------------------------
+const goBtn = document.getElementById("goBtn");
+const statusEl = document.getElementById("status");
+const outEl = document.getElementById("output");
+const outBox = document.getElementById("outBox");
+const dlBtn = document.getElementById("dlBtn");
+const keyEl = document.getElementById("apiKey");
+
+let resultText = null;
+
+goBtn.addEventListener("click", async () => {
+  const key = keyEl.value.trim();
+  if (!key.startsWith("sk-")) {
+    statusEl.textContent = "Please paste an OpenAI API key (starts with sk-).";
+    return;
+  }
+  goBtn.disabled = true;
+  statusEl.textContent = "Starting...";
+  const t0 = Date.now();
+  try {
+    resultText = await decompress(key, (done, total) => {
+      const elapsed = (Date.now() - t0) / 1000;
+      const rate = done / Math.max(elapsed, 0.001);
+      const eta = (total - done) / Math.max(rate, 0.001);
+      statusEl.textContent =
+        "Decompressed " + done + "/" + total +
+        " tokens (" + rate.toFixed(1) + " tok/s, ETA " + eta.toFixed(0) + "s)";
+    });
+    statusEl.textContent = "Done in " + ((Date.now() - t0) / 1000).toFixed(1) + "s.";
+    outBox.style.display = "block";
+    outEl.textContent = resultText;
+  } catch (e) {
+    statusEl.textContent = "Error: " + e.message;
+  } finally {
+    goBtn.disabled = false;
+  }
+});
+
+dlBtn.addEventListener("click", () => {
+  if (!resultText) return;
+  const blob = new Blob([resultText], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "decompressed.txt";
+  a.click();
+});
+</script>
+</body>
+</html>
