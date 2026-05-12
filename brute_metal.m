@@ -174,7 +174,7 @@ int main(int argc, const char **argv) {
             return 1;
         }
 
-        // Function constants: LENGTH gets baked in at pipeline-compile time,
+        // function constants: length gets baked in at pipeline-compile time
         // so dead branches in the shader are eliminated.
         MTLFunctionConstantValues *constants = [MTLFunctionConstantValues new];
         uint32_t length_val = (uint32_t)length;
@@ -217,12 +217,12 @@ int main(int argc, const char **argv) {
         ((uint32_t *)idx_buf.contents)[0] = 0;
         ((uint32_t *)idx_buf.contents)[1] = 0;
 
-        // Total search space = 256^length
+        // total search space = 256^length
         uint64_t total = 1;
         for (unsigned long long i = 0; i < length; i++) total *= 256;
 
-        // Bigger batches → less dispatch overhead.
-        // Cap at 2^28 so progress updates feel reasonable and dispatch fits in uint32 grid.
+        // bigger batches → less dispatch overhead.
+        // cap at 2^28 so progress updates feel reasonable and dispatch fits in uint32 grid.
         uint64_t batch_size = (1ULL << 28);
         if (batch_size > total) batch_size = total;
 

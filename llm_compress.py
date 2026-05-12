@@ -1,13 +1,13 @@
 """
 LLM compression: GPT-2 next-token probabilities + arithmetic coding.
 
-For each token in the input, we ask GPT-2 "given everything that came before,
+for each token in the input, ask GPT-2 "given everything that came before,
 what's your probability distribution over the next token?" The arithmetic coder
 then spends bits proportional to -log2(P(actual token)) -- if GPT-2 was 90%
 sure about the next token, encoding costs ~0.15 bits.
 
-Compressor and decompressor MUST use the exact same model with deterministic
-inference. We send zero model information in the output -- the decompressor
+compressor and decompressor must use the exact same model with deterministic
+inference. send zero model information in the output, the decompressor
 recomputes the same probabilities and recovers the tokens.
 
     python llm_compress.py compress   <text_file>       <compressed_file>
@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
-MODEL_NAME = "gpt2"  # 117M params, ~500MB on disk. Try gpt2-medium for better ratio.
+MODEL_NAME = "gpt2"  # 117M params, ~500MB on disk. larger models give better compression but are slower to run.
 
 
 def load_model():
@@ -39,7 +39,7 @@ def load_model():
 
 
 def logits_to_probs(logits):
-    """Convert a logits tensor to a normalized numpy float32 distribution.
+    """convert a logits tensor to a normalized numpy float32 distribution.
     We clamp tiny probabilities so the arithmetic coder always has a valid range."""
     probs = torch.softmax(logits, dim=-1).numpy().astype(np.float32)
     probs = np.maximum(probs, 1e-7)
@@ -59,10 +59,10 @@ def compress(input_path, output_path):
         sys.exit(1)
     print(f"input:  {len(text):,} chars  ->  {len(tokens):,} GPT-2 tokens")
 
-    # Prepend BOS so the model has a starting context for predicting tokens[0].
+    # prepend BOS so the model has a starting context for predicting tokens[0].
     bos = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
 
-    # CRITICAL: encoder must use the exact same forward-pass code path the
+    # encoder must use the exact same forward-pass code path the
     # decoder will use (one token at a time, with KV cache). Using a single
     # bulk forward pass here gives slightly different logits in some attention
     # kernels, which desyncs the arithmetic coder and produces garbage on
@@ -94,7 +94,7 @@ def compress(input_path, output_path):
 
     payload = compressed.tobytes()
     with open(output_path, "wb") as f:
-        # Header: 4 bytes for token count.
+        # header: 4 bytes for token count.
         f.write(struct.pack(">I", len(tokens)))
         f.write(payload)
 
@@ -126,7 +126,7 @@ def decompress(input_path, output_path):
 
     t0 = time.time()
     for i in range(num_tokens):
-        # First call seeds the model with BOS, then we use the KV cache and
+        # first call seeds the model with BOS, then we use the KV cache and
         # only feed the most recently decoded token. Each step is one fast
         # forward over a single token instead of recomputing the full prefix.
         input_ids = torch.tensor([[last_token]])

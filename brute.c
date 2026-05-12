@@ -36,7 +36,7 @@ void *worker(void *arg) {
     uint64_t local_count = 0;
 
     for (uint64_t i = args->start; i < args->end; i++) {
-        // Periodically check if another thread already won, and flush our progress
+        // periodically check if another thread already won, and flush progress
         if ((local_count & 0xFFFF) == 0xFFFF) {
             atomic_fetch_add_explicit(args->progress, local_count + 1,
                                        memory_order_relaxed);
@@ -50,7 +50,7 @@ void *worker(void *arg) {
         index_to_bytes(i, candidate, (int)args->length);
         CC_SHA256(candidate, (CC_LONG)args->length, hash);
 
-        // Fast path: compare first 8 bytes only. False-positive rate is
+        // compare first 8 bytes only. False-positive rate is
         // 1 in 2^64, so almost every non-match exits here.
         uint64_t first8;
         memcpy(&first8, hash, 8);

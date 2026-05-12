@@ -1,9 +1,5 @@
 # compression-experiments
 
-A teen-developer rabbit hole through compression, from "what if I just send the hash and brute-force it back?" to "use GPT-3.5 as a probability model and arithmetic-code the rest." Started with a bad idea, ended with a working LLM compressor that produces self-extracting HTML files.
-
-## The journey
-
 | Stage | Idea | Best result |
 |---|---|---|
 | 1 | Brute-force hash inversion (Python) | works for ≤3-byte files; ~0.6 M hashes/s |
@@ -11,11 +7,11 @@ A teen-developer rabbit hole through compression, from "what if I just send the 
 | 3 | NEON SHA-256 hardware intrinsics + threads | ~380 M H/s |
 | 4 | Apple Metal GPU compute shader | ~1.0 GH/s |
 | 5 | CPU + GPU concurrent | **~1.4 GH/s** (~2300× the Python version) |
-| 6 | "Deterministic index" version of the hash idea | proved the pigeonhole wall by demonstration |
+| 6 | "Deterministic index" version of the hash idea | proved the pigeonhole wall |
 | 7 | Local GPT-2 + arithmetic coding | English text → **13%** of original (vs gzip's ~57%) |
 | 8 | OpenAI API + self-extracting HTML page | same idea, no local model needed |
 
-Stages 1-5 are a sustained sprint at one bad idea — proving why arbitrary lossless compression below input size is impossible, while still milking the hardware for everything it has. Stages 6-8 are what compression actually looks like once you stop fighting pigeonhole and start exploiting structure.
+Stages 1-6 is one idea, proving why arbitrary lossless compression below input size is impossible. Stages 7-8 is another idea, that proved to be much better than well known compression algorithms for english text.
 
 ## What's in here
 
@@ -106,9 +102,9 @@ The HTML file is ~10 KB of template + the compressed payload (tens of bytes for 
 
 ## Known limitations
 
-- **API determinism risk.** OpenAI's logprobs jitter at ~4th decimal across identical calls. We mitigate by (a) quantizing logprobs to 2 decimals before sorting and (b) using a fixed rank distribution rather than one derived from per-call probabilities. Round-trip on natural English text works in our testing; pathological inputs could still desync.
+- **API determinism risk.** OpenAI's logprobs jitter at ~4th decimal across identical calls. mitigate by (a) quantizing logprobs to 2 decimals before sorting and (b) using a fixed rank distribution rather than one derived from per-call probabilities. Natural English text works in testing; pathological inputs could still desync.
 - **Speed.** API-based decompression is ~1 token/sec (one network round-trip per token). A 1 KB file takes ~6 minutes to extract. This is a demo, not a tool.
-- **Cost.** Each decompression costs the recipient ~$0.002 per token via the OpenAI API. A 1 KB file ≈ 50¢ per extraction.
+- **Cost.** Each decompression costs the recipient ~$0.002 per token via the OpenAI API. A 1 KB file costs about 50¢ per extraction.
 - **Only English text compresses well.** Random binary, source code, non-English get poor ratios (sometimes worse than the original) because GPT-3.5's predictions are weak there.
 - **The compressed payload is not encrypted.** Anyone with the same OpenAI API access can decompress. If you want privacy too, encrypt before compressing.
 

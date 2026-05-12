@@ -1,13 +1,11 @@
 """
-Simple bit-level arithmetic coder, portable across Python and JavaScript.
+simple bit level arithmetic coder, portable across python and JS.
 
-The bit-level output is fully determined by:
+The bit level output is fully determined by:
   - 32-bit precision (PRECISION = 32)
   - CDF arrays of integer cumulative counts, with total <= 2^16
 
-Both sides (Python encoder, JS decoder) must use identical CDFs and totals.
-
-References: Witten, Neal, Cleary (1987), "Arithmetic Coding for Data Compression."
+both sides (Python encoder, JS decoder) must use identical CDFs and totals.
 """
 
 PRECISION = 32
@@ -33,7 +31,7 @@ class ArithmeticEncoder:
         self.pending = 0
 
     def encode(self, cdf_low, cdf_high, total):
-        """Encode a symbol given its CDF range [cdf_low, cdf_high) and total."""
+        """encode a symbol given its CDF range [cdf_low, cdf_high) and total."""
         assert 0 <= cdf_low < cdf_high <= total <= MAX_TOTAL
         rng = self.high - self.low + 1
         self.high = self.low + (rng * cdf_high) // total - 1
@@ -56,7 +54,7 @@ class ArithmeticEncoder:
             self.high = ((self.high << 1) | 1) & MASK
 
     def finish(self):
-        """Flush state, return (bytes, bit_count)."""
+        """flush state, return (bytes, bit_count)."""
         self.pending += 1
         if self.low < QUARTER:
             self._emit_bit(0)
@@ -115,7 +113,7 @@ class ArithmeticDecoder:
 
     def decode_cdf(self, cdf, total):
         """cdf: list of length n+1 with cdf[0]=0, cdf[n]=total.
-        Returns symbol s in [0, n) s.t. cdf[s] <= value < cdf[s+1]."""
+        returns symbol s in [0, n) s.t. cdf[s] <= value < cdf[s+1]."""
         rng = self.high - self.low + 1
         v = ((self.value - self.low + 1) * total - 1) // rng
         # linear search through the small alphabet
@@ -126,7 +124,7 @@ class ArithmeticDecoder:
         return s
 
     def decode_uniform(self, total):
-        """Decode a symbol assuming uniform distribution over [0, total)."""
+        """decode a symbol assuming uniform distribution over [0, total)."""
         rng = self.high - self.low + 1
         s = ((self.value - self.low + 1) * total - 1) // rng
         self._renormalize_after_decode(s, s + 1, total)
@@ -134,7 +132,7 @@ class ArithmeticDecoder:
 
 
 def cdf_from_quantized(quantized):
-    """Given list of integer counts, return cumulative CDF [0, c0, c0+c1, ...]."""
+    """given list of integer counts, return cumulative CDF [0, c0, c0+c1, ...]."""
     cdf = [0]
     for q in quantized:
         cdf.append(cdf[-1] + q)
@@ -143,7 +141,7 @@ def cdf_from_quantized(quantized):
 
 # Quantize a float probability distribution to integer counts summing to `total`.
 def quantize_probs(probs, total):
-    """Returns list of integer counts (length = len(probs)) summing to `total`,
+    """returns list of integer counts (length = len(probs)) summing to `total`,
     each >= 1, approximating the float probabilities."""
     raw = [p * total for p in probs]
     q = [max(1, int(round(r))) for r in raw]

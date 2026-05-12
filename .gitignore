@@ -1,14 +1,14 @@
-# Secrets — NEVER commit
+# secrets
 .env
 .env.local
 
-# Python
+# python
 venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# C build outputs (no extension on macOS)
+# C build outputs
 brute
 brute_neon
 brute_mb
@@ -17,7 +17,7 @@ brute_combined
 *.o
 *.dSYM/
 
-# Generated/test artifacts
+# test artifacts
 *.api
 *.compressed
 *.idx
@@ -30,7 +30,7 @@ brute_combined
 *.mb_recovered
 *.combined_recovered
 
-# Test scratch — keep representative samples only (sample.txt)
+# test scratch files
 test2.*
 test3.*
 test4.*
@@ -43,9 +43,8 @@ snippet.*
 med.*
 tiny.*
 
-# Generated HTML — keep template.html only
+# generated HTML
 *.html
 !template.html
 
-# macOS
 .DS_Store

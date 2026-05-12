@@ -35,8 +35,8 @@ static const uint32_t H0_INIT[8] = {
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
 };
 
-// Compute SHA-256 of exactly 4 input bytes (packed big-endian into input_word).
-// Output: 8 hash words in state_out (each word = big-endian read of 4 hash bytes).
+// compute SHA-256 of exactly 4 input bytes (packed big-endian into input_word).
+// output: 8 hash words in state_out (each word = big-endian read of 4 hash bytes).
 static inline __attribute__((always_inline))
 void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
     uint32x4_t state0 = vld1q_u32(H0_INIT);
@@ -44,7 +44,7 @@ void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
     const uint32x4_t saved0 = state0;
     const uint32x4_t saved1 = state1;
 
-    // Message block for 4-byte input:
+    // message block for 4-byte input:
     //   W[0]  = input bytes (big-endian)
     //   W[1]  = 0x80000000  (1-bit pad followed by zeros)
     //   W[2..14] = 0
@@ -72,7 +72,7 @@ void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
     state1 = vsha256h2q_u32(state1, prev, tmp); \
 } while (0)
 
-    // Rounds 0-47 with schedule (12 iterations)
+    // rounds 0-47 with schedule (12 iterations)
     R_SCHED(msg0, msg1, msg2, msg3,  0);
     R_SCHED(msg1, msg2, msg3, msg0,  4);
     R_SCHED(msg2, msg3, msg0, msg1,  8);
@@ -86,7 +86,7 @@ void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
     R_SCHED(msg2, msg3, msg0, msg1, 40);
     R_SCHED(msg3, msg0, msg1, msg2, 44);
 
-    // Rounds 48-63 no schedule
+    // rounds 48-63 no schedule
     R_NOSCHED(msg0, 48);
     R_NOSCHED(msg1, 52);
     R_NOSCHED(msg2, 56);
@@ -95,7 +95,7 @@ void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
 #undef R_SCHED
 #undef R_NOSCHED
 
-    // Davies-Meyer: add saved (initial) state
+    // add saved (initial) state
     state0 = vaddq_u32(state0, saved0);
     state1 = vaddq_u32(state1, saved1);
 
@@ -103,7 +103,7 @@ void sha256_4byte(uint32_t input_word, uint32_t state_out[8]) {
     vst1q_u32(state_out + 4, state1);
 }
 
-// Sanity-check our NEON SHA-256 against Apple's CommonCrypto on random inputs.
+// check NEON SHA-256 against Apples CommonCrypto on random inputs.
 static int verify_sha256(void) {
     uint32_t test_inputs[] = {
         0x00000000, 0x61626364, 0x776f7264, 0xdeadbeef,
@@ -169,8 +169,8 @@ void *worker(void *arg) {
 
         sha256_4byte((uint32_t)i, state);
 
-        // Fast path: compare first 32-bit hash word ('a').
-        // False-positive rate is 1 in 2^32, so almost every non-match exits here.
+        // compare first 32-bit hash word ('a').
+        // false positive rate is 1 in 2^32, so almost every non-match exits here.
         if (__builtin_expect(state[0] == target_a, 0)) {
             if (memcmp(state, args->target_state, 32) == 0) {
                 atomic_store(args->found_flag, 1);
@@ -233,7 +233,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Convert target hash bytes to 8 big-endian uint32 words for fast compare.
+    // convert target hash bytes to 8 big-endian uint32 words for fast compare.
     uint32_t target_state[8];
     for (int i = 0; i < 8; i++) {
         target_state[i] = ((uint32_t)target_hash[i*4]     << 24) |

@@ -1,13 +1,13 @@
 """
 LLM compression using OpenAI's API as the probability source.
 
-For each token after position 0 we ask GPT-3.5-turbo-instruct for its top-5
-predictions given the previous tokens. The "rank" of the actual token (0..4
-for in-top-5, or "escape" if not) gets arithmetic-coded with a FIXED rank
-distribution that's the same on both sides -- robust to ~4th-decimal logprob
-jitter that we see across identical API calls.
+For each token after position 0 ask GPT-3.5-turbo-instruct for its top-5
+predictions given the previous tokens. The rank of the actual token (0-4
+for in-top-5, or escape if not) gets arithmetic-coded with a fixed rank
+distribution that's the same on both sides, robust to 4th-decimal logprob
+jitter that is see across identical API calls.
 
-Position 0 and escapes are stored as "literals". To avoid needing a tokenizer
+Position 0 and escapes are stored as literals. To avoid needing a tokenizer
 in the decoder, literals go into a small in-file table of unique strings, and
 the stream just contains table indices.
 
@@ -69,22 +69,22 @@ def load_api_key():
 
 
 def quantize_logprob(lp):
-    """Round to 2 decimal places for stable sort despite ~4th-decimal jitter."""
+    """Round to 2 decimal places for stable sort despite 4th-decimal jitter."""
     return round(lp, 2)
 
 
 def sorted_top_strings(top_lp_dict):
-    """Return list of token STRINGS sorted by quantized logprob DESC, tie-break
+    """Return list of token strings sorted by quantized logprob DESC, tie-break
     lexically ASC. This sort must be reproducible across encoder/decoder
-    calls; quantization handles tiny logprob jitter."""
+    calls, quantization handles tiny logprob jitter."""
     items = [(s, quantize_logprob(lp)) for s, lp in top_lp_dict.items()]
     items.sort(key=lambda x: (-x[1], x[0]))
     return [s for s, _ in items]
 
 
 async def _fetch_logprobs_at(aclient, prefix_text, sem):
-    """Send a STRING prompt (not token ids) so behavior matches what an
-    in-browser JS decoder would do."""
+    """Send a string prompt (not token ids) so behavior matches what an
+    in browser JS decoder would do."""
     async with sem:
         resp = await aclient.completions.create(
             model=MODEL,
@@ -99,12 +99,12 @@ async def _fetch_logprobs_at(aclient, prefix_text, sem):
 
 
 async def _fetch_all_logprobs(api_key, token_ids, concurrency=20):
-    """Get top-K logprobs for each position i in 1..N-1 using the decoded
+    """Get top-k logprobs for each position i in 1..N-1 using the decoded
     prefix text as the prompt."""
     aclient = AsyncOpenAI(api_key=api_key)
     sem = asyncio.Semaphore(concurrency)
 
-    # Build prefix text up to (but not including) each position
+    # build prefix text up to (but not including) each position
     prefixes = []
     running = ""
     for tok_id in token_ids[:-1]:
@@ -118,14 +118,14 @@ async def _fetch_all_logprobs(api_key, token_ids, concurrency=20):
 
 
 def token_string(tok_id):
-    """Decode a single token id to its string. For normal English text this
-    is well-defined; for partial-byte BPE tokens results may be a replacement
-    char, but the SAME string will always be produced for the same id."""
+    """decode a single token id to its string. For normal English text this
+    is well-defined, for partial-byte BPE tokens results may be a replacement
+    char, but the same string will always be produced for the same id."""
     return encoding.decode([tok_id])
 
 
 def _encode_text_to_payload(text):
-    """Run the full encode pipeline. Returns (payload_bytes, stats_dict)."""
+    """run the full encode pipeline. Returns (payload_bytes, stats_dict)."""
     api_key = load_api_key()
     if not api_key:
         print("OPENAI_API_KEY not set", file=sys.stderr)
@@ -168,7 +168,7 @@ def _encode_text_to_payload(text):
         else:
             rank_or_escape.append(rank)
 
-    # Dedupe literals into a table
+    # dedupe literals into a table
     seen = {}
     literal_table = []
     for s in literal_seq:
@@ -197,7 +197,7 @@ def _encode_text_to_payload(text):
 
     ac_bytes, bit_count = enc.finish()
 
-    # Serialize to the on-disk format
+    # serialize to the on-disk format
     parts = []
     parts.append(struct.pack(">I", len(token_ids)))
     parts.append(struct.pack(">H", len(literal_table)))
@@ -303,13 +303,13 @@ async def _decompress_async(input_path, output_path):
 
     decoded_strings = []
 
-    # Position 0: read literal index
+    # position 0: read literal index
     idx = dec.decode_uniform(table_size)
     decoded_strings.append(literal_table[idx])
 
     t0 = time.time()
     for i in range(1, token_count):
-        # Use STRING prompt so behavior matches an in-browser JS decoder.
+        # use string prompt so behavior matches an in-browser JS decoder.
         prefix_text = "".join(decoded_strings)
 
         resp = await aclient.completions.create(

@@ -374,7 +374,7 @@ int main(int argc, const char **argv) {
         ((uint32_t *)gpu_idx_buf.contents)[0] = 0;
         ((uint32_t *)gpu_idx_buf.contents)[1] = 0;
 
-        // Search space and split
+        // search space and split
         uint64_t total = 1;
         for (unsigned long long i = 0; i < length; i++) total *= 256;
         // GPU is ~2.7x faster than CPU. Give GPU ~73% of work.
@@ -392,12 +392,12 @@ int main(int argc, const char **argv) {
         printf("threads:      %d CPU + GPU (threads/group %lu)\n\n",
                num_cpu_threads, (unsigned long)threads_per_group);
 
-        // Shared atomic state (visible to both CPU threads and main GPU loop)
+        // shared atomic state (visible to both CPU threads and main GPU loop)
         atomic_int found_flag = 0;
         atomic_uint_fast64_t found_index = 0;
         atomic_uint_fast64_t cpu_progress = 0;
 
-        // Spawn CPU worker threads on [cpu_start, total)
+        // spawn CPU worker threads on [cpu_start, total)
         pthread_t cpu_threads[num_cpu_threads];
         cpu_worker_args_t cpu_args[num_cpu_threads];
         uint64_t cpu_chunk = cpu_share / num_cpu_threads;
@@ -424,7 +424,7 @@ int main(int argc, const char **argv) {
         struct timespec last_print = start;
 
         for (uint64_t base = 0; base < gpu_share; base += batch_size) {
-            // Stop if either side already found
+            // stop if either side already found
             if (atomic_load(&found_flag)) break;
 
             *(uint64_t *)base_buf.contents = base;
@@ -445,18 +445,18 @@ int main(int argc, const char **argv) {
             [cmdbuf waitUntilCompleted];
             gpu_processed = base + this_batch;
 
-            // Check if GPU found something this batch
+            // check if GPU found something this batch
             if (*(uint32_t *)gpu_flag_buf.contents != 0) {
                 uint32_t lo = ((uint32_t *)gpu_idx_buf.contents)[0];
                 uint32_t hi = ((uint32_t *)gpu_idx_buf.contents)[1];
                 uint64_t idx = ((uint64_t)hi << 32) | lo;
-                // Set shared flag so CPU threads stop quickly
+                // set shared flag so CPU threads stop quickly
                 atomic_store(&found_index, idx);
                 atomic_store(&found_flag, 1);
                 break;
             }
 
-            // Progress
+            // progress
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             double elapsed = (now.tv_sec - start.tv_sec) +
@@ -487,7 +487,7 @@ int main(int argc, const char **argv) {
             }
         }
 
-        // Wait for CPU threads (they exit when found_flag set or their range done)
+        // wait for CPU threads (they exit when found_flag set or their range done)
         for (int i = 0; i < num_cpu_threads; i++) {
             pthread_join(cpu_threads[i], NULL);
         }

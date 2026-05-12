@@ -37,8 +37,8 @@ static const uint32_t H0_INIT[8] = {
 
 #define ROTR_V(x, n) (vorrq_u32(vshrq_n_u32((x), (n)), vshlq_n_u32((x), 32 - (n))))
 
-// Process 4 SHA-256 hashes in parallel via SIMD lanes (one candidate per lane).
-// Specialized for 4-byte input.
+// process 4 SHA-256 hashes in parallel via SIMD lanes (one candidate per lane).
+// specialized for 4-byte input.
 static inline __attribute__((always_inline))
 void sha256_4way_4byte(uint32x4_t inputs, uint32x4_t state_out[8]) {
     uint32x4_t a = vdupq_n_u32(H0_INIT[0]);
@@ -50,7 +50,7 @@ void sha256_4way_4byte(uint32x4_t inputs, uint32x4_t state_out[8]) {
     uint32x4_t g = vdupq_n_u32(H0_INIT[6]);
     uint32x4_t h = vdupq_n_u32(H0_INIT[7]);
 
-    // Rolling W window: 16 vec slots cover the full 64-round schedule.
+    // rolling W window: 16 vec slots cover the full 64-round schedule.
     uint32x4_t W[16];
     W[0] = inputs;
     W[1] = vdupq_n_u32(0x80000000U);
@@ -76,7 +76,7 @@ void sha256_4way_4byte(uint32x4_t inputs, uint32x4_t state_out[8]) {
     R(8, W[8]);  R(9, W[9]);  R(10, W[10]); R(11, W[11]);
     R(12, W[12]); R(13, W[13]); R(14, W[14]); R(15, W[15]);
 
-    // Rounds 16-63: rolling schedule + round, fully unrolled.
+    // rounds 16-63: rolling schedule + round, fully unrolled.
 #define SCHED_AND_R(i) do { \
     uint32x4_t w16 = W[(i) & 15]; \
     uint32x4_t w15 = W[((i) + 1) & 15]; \
@@ -115,7 +115,7 @@ void sha256_4way_4byte(uint32x4_t inputs, uint32x4_t state_out[8]) {
     state_out[7] = vaddq_u32(h, vdupq_n_u32(H0_INIT[7]));
 }
 
-// Self-test: compare 4-way output against CC_SHA256 for known inputs.
+// self test: compare 4-way output against CC_SHA256 for known inputs.
 static int verify(void) {
     uint32_t test[4] = {0x61626364, 0x776f7264, 0xdeadbeef, 0xcafebabe};
     uint32x4_t inputs = vld1q_u32(test);
