@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nnzip"
-version = "0.1.0"
+version = "0.1.1"
 description = "Text compression that uses a local GPT-2 model as a probability source."
 readme = "README.md"
 license = { file = "LICENSE" }

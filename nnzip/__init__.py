@@ -60,6 +60,43 @@ def _logits_to_probs(logits):
     return (probs / probs.sum()).astype(np.float32)
 
 
+# GPT-2 supports position embeddings 0..1023. Once the KV cache fills, the next
+# position would be OOB. When the cache reaches MAX_CACHE we truncate it down
+# to KEEP_AFTER, throwing away the oldest tokens. The exact same truncation
+# happens on encode and decode, so both stay in sync.
+MAX_CACHE = 1023
+KEEP_AFTER = 512
+
+
+def _cache_length(past):
+    if past is None:
+        return 0
+    if hasattr(past, "get_seq_length"):
+        return past.get_seq_length()
+    return past[0][0].shape[2]
+
+
+def _truncate_cache(past, keep):
+    """Keep only the last `keep` token entries in the cache."""
+    if past is None:
+        return None
+    if hasattr(past, "crop"):
+        past.crop(keep)
+        return past
+    if hasattr(past, "key_cache"):
+        # DynamicCache without crop method; manually slice each layer's tensors
+        for i in range(len(past.key_cache)):
+            past.key_cache[i] = past.key_cache[i][..., -keep:, :]
+            past.value_cache[i] = past.value_cache[i][..., -keep:, :]
+        if hasattr(past, "_seen_tokens"):
+            past._seen_tokens = min(past._seen_tokens, keep)
+        return past
+    # legacy tuple-of-tuples format
+    return tuple(
+        (k[..., -keep:, :], v[..., -keep:, :]) for k, v in past
+    )
+
+
 def compress_text(text):
     """Compress UTF-8 text. Returns bytes of the .nnz format."""
     _load_deps()
@@ -79,6 +116,8 @@ def compress_text(text):
     t0 = time.time()
 
     for i, token in enumerate(tokens):
+        if _cache_length(past) >= MAX_CACHE:
+            past = _truncate_cache(past, KEEP_AFTER)
         input_ids = torch.tensor([[last_token]])
         with torch.no_grad():
             out = model(input_ids, past_key_values=past, use_cache=True)
@@ -137,6 +176,8 @@ def decompress_bytes(data):
     t0 = time.time()
 
     for i in range(num_tokens):
+        if _cache_length(past) >= MAX_CACHE:
+            past = _truncate_cache(past, KEEP_AFTER)
         input_ids = torch.tensor([[last_token]])
         with torch.no_grad():
             out = model(input_ids, past_key_values=past, use_cache=True)
