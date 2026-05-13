@@ -7,6 +7,12 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# llmz output files
+*.llmz
 
 # C build outputs
 brute

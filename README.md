@@ -31,9 +31,10 @@ Stages 1-6 is one idea, proving why arbitrary lossless compression below input s
 
 | File | What it does |
 |---|---|
+| `llmz/` | Python package: local GPT-2 + arithmetic coding. Installs as `compress`, `decompress`, and `llmz` CLI commands. |
+| `pyproject.toml` | Packaging config: declares the CLI entry points and dependencies. |
 | `arithmetic_coder.py` | Portable bit-level arithmetic coder. Identical output in Python and the JS port (see `template.html`). |
-| `llm_compress.py` | Local GPT-2 compression (Python only, requires PyTorch + transformers). |
-| `api_compress.py` | OpenAI API compression. Three modes: `compress` produces a binary `.api` file, `decompress` reverses it, `compress-html` bakes the payload into a portable HTML self-extractor. |
+| `api_compress.py` | OpenAI API compression (no local model, but slow and pay-per-use). Three modes: `compress` produces a binary `.api` file, `decompress` reverses it, `compress-html` bakes the payload into a portable HTML self-extractor. |
 | `template.html` | The HTML self-extractor template with the JS arithmetic decoder inline. The Python compressor fills in the `__PAYLOAD_B64__` etc. placeholders. |
 
 ### Test data
@@ -64,19 +65,40 @@ python3 compress.py test4.txt test4.compressed
 
 The full 4-byte search space is 4.3 billion candidates. The Python decompressor would take ~38 minutes. The combined CPU+GPU version finds the right one in ~2 seconds.
 
-### Local LLM compression (no API key needed)
+### Local LLM compression — the `llmz` CLI (works on Mac and Windows)
 
-Requires PyTorch and transformers:
+Install the package (one-time, downloads PyTorch + transformers ~600 MB):
 
 ```
 python3.12 -m venv venv
-./venv/bin/pip install torch "transformers<5" "numpy<2" constriction
-./venv/bin/python llm_compress.py compress sample.txt sample.llm
-./venv/bin/python llm_compress.py decompress sample.llm sample.recovered
-diff sample.txt sample.recovered
+./venv/bin/pip install -e .
 ```
 
-First run downloads GPT-2 (~500 MB). Expect ~13% of original size on English text.
+On Windows, use `python -m venv venv` and `venv\Scripts\pip install -e .` — same package, same commands afterward.
+
+Then `compress` and `decompress` are available as commands:
+
+```
+./venv/bin/compress sample.txt              # produces sample.txt.llmz
+./venv/bin/decompress sample.txt.llmz       # restores sample.txt
+```
+
+Or use the `llmz` namespaced command:
+
+```
+./venv/bin/llmz compress sample.txt
+./venv/bin/llmz decompress sample.txt.llmz
+```
+
+First run downloads GPT-2 (~500 MB) and caches it in `~/.cache/huggingface`. Expect ~13-20% of original size on English text. Non-English / source code / random binary may not compress (or may grow).
+
+To use a larger model with better compression, set the environment variable:
+
+```
+LLMZ_MODEL=gpt2-medium ./venv/bin/compress sample.txt   # ~1.5 GB download, better ratio
+```
+
+The model name is stored in the `.llmz` file so the decompressor automatically loads the matching one.
 
 ### OpenAI API compression (small payloads, portable HTML)
 
