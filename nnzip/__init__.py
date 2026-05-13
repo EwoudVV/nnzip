@@ -36,6 +36,10 @@ def _load_deps():
     import constriction as _constriction
     from transformers import GPT2LMHeadModel as _GPT2LMHeadModel
     from transformers import AutoTokenizer as _AutoTokenizer
+    # Silence transformers' "sequence longer than max length" warning — our
+    # sliding window handles that case; the tokenizer doesn't know we will.
+    from transformers import logging as _hf_logging
+    _hf_logging.set_verbosity_error()
     torch = _torch
     np = _np
     constriction = _constriction
