@@ -1,5 +1,10 @@
 # compression-experiments
 
+## install
+```
+pip install nnzip
+```
+
 | Stage | Idea | Best result |
 |---|---|---|
 | 1 | Brute-force hash inversion (Python) | works for ≤3-byte files; ~0.6 M hashes/s |
