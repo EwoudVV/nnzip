@@ -1,5 +1,5 @@
 """
-llmz: text compression that uses a local GPT-2 as the probability model.
+nnzip: text compression that uses a local GPT-2 as the probability model.
 
 For each token, GPT-2 produces a probability distribution over the next token.
 Arithmetic coding spends -log2(P) bits per token, so tokens the model is
@@ -11,10 +11,10 @@ contains zero model information -- the decoder re-runs the same forward passes
 and decodes the bits.
 
 CLI:
-    llmz compress file.txt          # produces file.txt.llmz
-    llmz decompress file.txt.llmz   # produces file.txt
-    compress file.txt               # same as `llmz compress`
-    decompress file.txt.llmz        # same as `llmz decompress`
+    nnzip compress file.txt          # produces file.txt.nnz
+    nnzip decompress file.txt.nnz   # produces file.txt
+    compress file.txt               # same as `nnzip compress`
+    decompress file.txt.nnz        # same as `nnzip decompress`
 """
 
 import argparse
@@ -23,13 +23,13 @@ import struct
 import sys
 import time
 
-MODEL_NAME = "gpt2"  # 117M params, ~500MB on disk. Override with $LLMZ_MODEL.
-MAGIC = b"LLMZ"
+MODEL_NAME = "gpt2"  # 117M params, ~500MB on disk. Override with $NNZIP_MODEL.
+MAGIC = b"NNZP"
 VERSION = 1
 
 
 def _load_deps():
-    """Heavy imports happen here so `llmz --help` is fast."""
+    """Heavy imports happen here so `nnzip --help` is fast."""
     global torch, np, constriction, GPT2LMHeadModel, AutoTokenizer
     import torch as _torch
     import numpy as _np
@@ -44,7 +44,7 @@ def _load_deps():
 
 
 def _load_model():
-    model_name = os.environ.get("LLMZ_MODEL", MODEL_NAME)
+    model_name = os.environ.get("NNZIP_MODEL", MODEL_NAME)
     print(f"loading {model_name}... (first run downloads ~500MB)", flush=True)
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -61,7 +61,7 @@ def _logits_to_probs(logits):
 
 
 def compress_text(text):
-    """Compress UTF-8 text. Returns bytes of the .llmz format."""
+    """Compress UTF-8 text. Returns bytes of the .nnz format."""
     _load_deps()
     model, tokenizer, model_name = _load_model()
 
@@ -110,18 +110,18 @@ def decompress_bytes(data):
     _load_deps()
 
     if not data.startswith(MAGIC):
-        raise ValueError("not an llmz file (missing magic bytes)")
+        raise ValueError("not an nnzip file (missing magic bytes)")
     pos = 4
     version = data[pos]; pos += 1
     if version != VERSION:
-        raise ValueError(f"unsupported llmz version {version}")
+        raise ValueError(f"unsupported nnzip version {version}")
     name_len = data[pos]; pos += 1
     model_name = data[pos:pos + name_len].decode("utf-8"); pos += name_len
     num_tokens = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
     payload = data[pos:]
 
-    if model_name != os.environ.get("LLMZ_MODEL", MODEL_NAME):
-        os.environ["LLMZ_MODEL"] = model_name  # ensure we load the right one
+    if model_name != os.environ.get("NNZIP_MODEL", MODEL_NAME):
+        os.environ["NNZIP_MODEL"] = model_name  # ensure we load the right one
 
     model, tokenizer, _ = _load_model()
     bos = (tokenizer.bos_token_id
@@ -157,15 +157,18 @@ def decompress_bytes(data):
     return tokenizer.decode(decoded)
 
 
+EXTENSION = ".nnz"
+
+
 def _resolve_output_for_compress(input_path, output_path):
-    return output_path or (input_path + ".llmz")
+    return output_path or (input_path + EXTENSION)
 
 
 def _resolve_output_for_decompress(input_path, output_path):
     if output_path:
         return output_path
-    if input_path.lower().endswith(".llmz"):
-        return input_path[:-5]
+    if input_path.lower().endswith(EXTENSION):
+        return input_path[: -len(EXTENSION)]
     return input_path + ".decompressed"
 
 
@@ -201,9 +204,9 @@ def decompress_file(input_path, output_path=None):
 # ----- CLI entry points -----
 
 def main(argv=None):
-    """The `llmz` command with subcommands."""
+    """The `nnzip` command with subcommands."""
     parser = argparse.ArgumentParser(
-        prog="llmz",
+        prog="nnzip",
         description="LLM-based text compression (uses local GPT-2).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -211,12 +214,12 @@ def main(argv=None):
     p1 = sub.add_parser("compress", help="compress a text file")
     p1.add_argument("input")
     p1.add_argument("output", nargs="?", default=None,
-                    help="default: <input>.llmz")
+                    help="default: <input>.nnz")
 
-    p2 = sub.add_parser("decompress", help="decompress an .llmz file")
+    p2 = sub.add_parser("decompress", help="decompress an .nnz file")
     p2.add_argument("input")
     p2.add_argument("output", nargs="?", default=None,
-                    help="default: strip .llmz from input")
+                    help="default: strip .nnz from input")
 
     args = parser.parse_args(argv)
     if args.cmd == "compress":
@@ -229,11 +232,11 @@ def compress_main(argv=None):
     """The bare `compress` command."""
     parser = argparse.ArgumentParser(
         prog="compress",
-        description="Compress a text file with llmz (local GPT-2).",
+        description="Compress a text file with nnzip (local GPT-2).",
     )
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None,
-                        help="default: <input>.llmz")
+                        help="default: <input>.nnz")
     args = parser.parse_args(argv)
     compress_file(args.input, args.output)
 
@@ -242,11 +245,11 @@ def decompress_main(argv=None):
     """The bare `decompress` command."""
     parser = argparse.ArgumentParser(
         prog="decompress",
-        description="Decompress an .llmz file with llmz (local GPT-2).",
+        description="Decompress an .nnz file with nnzip (local GPT-2).",
     )
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None,
-                        help="default: strip .llmz from input")
+                        help="default: strip .nnz from input")
     args = parser.parse_args(argv)
     decompress_file(args.input, args.output)
 

@@ -31,7 +31,7 @@ Stages 1-6 is one idea, proving why arbitrary lossless compression below input s
 
 | File | What it does |
 |---|---|
-| `llmz/` | Python package: local GPT-2 + arithmetic coding. Installs as `compress`, `decompress`, and `llmz` CLI commands. |
+| `nnzip/` | Python package: local GPT-2 + arithmetic coding. Installs as `compress`, `decompress`, and `nnzip` CLI commands. |
 | `pyproject.toml` | Packaging config: declares the CLI entry points and dependencies. |
 | `arithmetic_coder.py` | Portable bit-level arithmetic coder. Identical output in Python and the JS port (see `template.html`). |
 | `api_compress.py` | OpenAI API compression (no local model, but slow and pay-per-use). Three modes: `compress` produces a binary `.api` file, `decompress` reverses it, `compress-html` bakes the payload into a portable HTML self-extractor. |
@@ -65,7 +65,7 @@ python3 compress.py test4.txt test4.compressed
 
 The full 4-byte search space is 4.3 billion candidates. The Python decompressor would take ~38 minutes. The combined CPU+GPU version finds the right one in ~2 seconds.
 
-### Local LLM compression — the `llmz` CLI (works on Mac and Windows)
+### Local LLM compression — the `nnzip` CLI (works on Mac and Windows)
 
 Install the package (one-time, downloads PyTorch + transformers ~600 MB):
 
@@ -79,15 +79,15 @@ On Windows, use `python -m venv venv` and `venv\Scripts\pip install -e .` — sa
 Then `compress` and `decompress` are available as commands:
 
 ```
-./venv/bin/compress sample.txt              # produces sample.txt.llmz
-./venv/bin/decompress sample.txt.llmz       # restores sample.txt
+./venv/bin/compress sample.txt           # produces sample.txt.nnz
+./venv/bin/decompress sample.txt.nnz     # restores sample.txt
 ```
 
-Or use the `llmz` namespaced command:
+Or use the namespaced command:
 
 ```
-./venv/bin/llmz compress sample.txt
-./venv/bin/llmz decompress sample.txt.llmz
+./venv/bin/nnzip compress sample.txt
+./venv/bin/nnzip decompress sample.txt.nnz
 ```
 
 First run downloads GPT-2 (~500 MB) and caches it in `~/.cache/huggingface`. Expect ~13-20% of original size on English text. Non-English / source code / random binary may not compress (or may grow).
@@ -95,10 +95,10 @@ First run downloads GPT-2 (~500 MB) and caches it in `~/.cache/huggingface`. Exp
 To use a larger model with better compression, set the environment variable:
 
 ```
-LLMZ_MODEL=gpt2-medium ./venv/bin/compress sample.txt   # ~1.5 GB download, better ratio
+NNZIP_MODEL=gpt2-medium ./venv/bin/compress sample.txt   # ~1.5 GB download, better ratio
 ```
 
-The model name is stored in the `.llmz` file so the decompressor automatically loads the matching one.
+The model name is stored in the `.nnz` file so the decompressor automatically loads the matching one.
 
 ### OpenAI API compression (small payloads, portable HTML)
 

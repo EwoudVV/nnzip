@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llmz"
+name = "nnzip"
 version = "0.1.0"
 description = "Text compression that uses a local GPT-2 model as a probability source."
 readme = "README.md"
@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.scripts]
-llmz = "llmz:main"
-compress = "llmz:compress_main"
-decompress = "llmz:decompress_main"
+nnzip = "nnzip:main"
+compress = "nnzip:compress_main"
+decompress = "nnzip:decompress_main"
 
 [tool.setuptools]
-packages = ["llmz"]
+packages = ["nnzip"]
