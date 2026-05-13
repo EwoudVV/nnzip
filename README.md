@@ -1,4 +1,4 @@
-# compression-experiments
+# nnzip (neural network zip)
 
 ## install
 ```
