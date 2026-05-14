@@ -38,11 +38,11 @@ except Exception:
 MAGIC = b"NNZP"
 VERSION = 2  # v1 used torch+transformers; v2 uses llama.cpp
 
-# Pre-converted FP16 GGUF of OpenAI GPT-2 (124M params, ~252MB) on Hugging Face.
-# Both encoder and decoder must use the same model file; pinning the repo and
-# filename guarantees that.
-HF_REPO = "sjfalken/openai-gpt2-124M-F16-gguf"
-HF_FILE = "openai-gpt2-124M-F16.gguf"
+# FP16 GGUF of OpenAI GPT-2 (124M params, ~252MB) on Hugging Face, mirrored
+# under the project's own account so the supply chain doesn't depend on a
+# third-party uploader. Both encoder and decoder must use the same model file.
+HF_REPO = "eeeev1343/nnzip-gpt2-base-f16"
+HF_FILE = "nnzip-gpt2.gguf"
 
 # GPT-2 supports positions 0..1023. When the context hits MAX_CACHE we reset
 # and re-feed the last KEEP_AFTER tokens. Encoder and decoder do this at the
