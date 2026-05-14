@@ -1,5 +1,10 @@
 # nnzip — neural-network text compression
 
+[![PyPI](https://img.shields.io/pypi/v/nnzip)](https://pypi.org/project/nnzip/)
+[![tests](https://github.com/EwoudVV/nnzip/actions/workflows/tests.yml/badge.svg)](https://github.com/EwoudVV/nnzip/actions/workflows/tests.yml)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/nnzip)](https://pypi.org/project/nnzip/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A cross-platform CLI that compresses English text using a local GPT-2 as a probability model. On natural prose it gets around **15-25% of the original size** — typically 3-5× better than `gzip`.
 
 ```
