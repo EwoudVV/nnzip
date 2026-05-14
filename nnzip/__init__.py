@@ -1,20 +1,26 @@
 """
-nnzip: text compression that uses a local GPT-2 as the probability model.
+nnzip: text compression that uses a local GPT-2 (via llama.cpp) as the
+probability model.
 
 For each token, GPT-2 produces a probability distribution over the next token.
 Arithmetic coding spends -log2(P) bits per token, so tokens the model is
-confident about cost almost nothing. English text typically lands at ~13-20%
+confident about cost almost nothing. English text typically lands at ~15-25%
 of original size -- usually 3-5x better than gzip.
 
-Both encoder and decoder must use the exact same model. The compressed file
-contains zero model information -- the decoder re-runs the same forward passes
-and decodes the bits.
+llama.cpp gives us cross-platform native inference (Mac/Linux/Windows, optional
+Metal/CUDA) with a much smaller dependency footprint than torch+transformers.
 
 CLI:
     nnzip compress file.txt          # produces file.txt.nnz
-    nnzip decompress file.txt.nnz   # produces file.txt
-    compress file.txt               # same as `nnzip compress`
-    decompress file.txt.nnz        # same as `nnzip decompress`
+    nnzip decompress file.txt.nnz    # produces file.txt
+    compress file.txt                # same as `nnzip compress`
+    decompress file.txt.nnz          # same as `nnzip decompress`
+
+File format (v2):
+    4 bytes : magic "NNZP"
+    1 byte  : version (= 2)
+    4 bytes : token_count (uint32 BE)
+    rest    : arithmetic-coded payload (uint32 words)
 """
 
 import argparse
@@ -23,115 +29,103 @@ import struct
 import sys
 import time
 
-MODEL_NAME = "gpt2"  # 117M params, ~500MB on disk. Override with $NNZIP_MODEL.
 MAGIC = b"NNZP"
-VERSION = 1
+VERSION = 2  # v1 used torch+transformers; v2 uses llama.cpp
 
+# Pre-converted FP16 GGUF of OpenAI GPT-2 (124M params, ~252MB) on Hugging Face.
+# Both encoder and decoder must use the same model file; pinning the repo and
+# filename guarantees that.
+HF_REPO = "sjfalken/openai-gpt2-124M-F16-gguf"
+HF_FILE = "openai-gpt2-124M-F16.gguf"
 
-def _load_deps():
-    """Heavy imports happen here so `nnzip --help` is fast."""
-    global torch, np, constriction, GPT2LMHeadModel, AutoTokenizer
-    import torch as _torch
-    import numpy as _np
-    import constriction as _constriction
-    from transformers import GPT2LMHeadModel as _GPT2LMHeadModel
-    from transformers import AutoTokenizer as _AutoTokenizer
-    # Silence transformers' "sequence longer than max length" warning — our
-    # sliding window handles that case; the tokenizer doesn't know we will.
-    from transformers import logging as _hf_logging
-    _hf_logging.set_verbosity_error()
-    torch = _torch
-    np = _np
-    constriction = _constriction
-    GPT2LMHeadModel = _GPT2LMHeadModel
-    AutoTokenizer = _AutoTokenizer
-
-
-def _load_model():
-    model_name = os.environ.get("NNZIP_MODEL", MODEL_NAME)
-    print(f"loading {model_name}... (first run downloads ~500MB)", flush=True)
-    t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = GPT2LMHeadModel.from_pretrained(model_name)
-    model.eval()
-    print(f"loaded in {time.time() - t0:.1f}s", flush=True)
-    return model, tokenizer, model_name
-
-
-def _logits_to_probs(logits):
-    probs = torch.softmax(logits, dim=-1).numpy().astype(np.float32)
-    probs = np.maximum(probs, 1e-7)
-    return (probs / probs.sum()).astype(np.float32)
-
-
-# GPT-2 supports position embeddings 0..1023. Once the KV cache fills, the next
-# position would be OOB. When the cache reaches MAX_CACHE we truncate it down
-# to KEEP_AFTER, throwing away the oldest tokens. The exact same truncation
-# happens on encode and decode, so both stay in sync.
+# GPT-2 supports positions 0..1023. When the context hits MAX_CACHE we reset
+# and re-feed the last KEEP_AFTER tokens. Encoder and decoder do this at the
+# same iteration, so they stay in sync.
+N_CTX = 1024
 MAX_CACHE = 1023
 KEEP_AFTER = 512
 
 
-def _cache_length(past):
-    if past is None:
-        return 0
-    if hasattr(past, "get_seq_length"):
-        return past.get_seq_length()
-    return past[0][0].shape[2]
+def _load_deps():
+    """Lazy imports so `nnzip --help` doesn't pull in llama_cpp."""
+    global Llama, np, constriction, hf_hub_download
+    from llama_cpp import Llama as _Llama
+    import numpy as _np
+    import constriction as _constriction
+    from huggingface_hub import hf_hub_download as _hf_hub_download
+    Llama = _Llama
+    np = _np
+    constriction = _constriction
+    hf_hub_download = _hf_hub_download
 
 
-def _truncate_cache(past, keep):
-    """Keep only the last `keep` token entries in the cache."""
-    if past is None:
-        return None
-    if hasattr(past, "crop"):
-        past.crop(keep)
-        return past
-    if hasattr(past, "key_cache"):
-        # DynamicCache without crop method; manually slice each layer's tensors
-        for i in range(len(past.key_cache)):
-            past.key_cache[i] = past.key_cache[i][..., -keep:, :]
-            past.value_cache[i] = past.value_cache[i][..., -keep:, :]
-        if hasattr(past, "_seen_tokens"):
-            past._seen_tokens = min(past._seen_tokens, keep)
-        return past
-    # legacy tuple-of-tuples format
-    return tuple(
-        (k[..., -keep:, :], v[..., -keep:, :]) for k, v in past
+def _load_model():
+    override = os.environ.get("NNZIP_MODEL_PATH")
+    if override:
+        model_path = override
+    else:
+        print(f"resolving {HF_REPO}/{HF_FILE}... "
+              f"(first run downloads ~250MB)", flush=True)
+        model_path = hf_hub_download(repo_id=HF_REPO, filename=HF_FILE)
+
+    print(f"loading {os.path.basename(model_path)}...", flush=True)
+    t0 = time.time()
+    llm = Llama(
+        model_path=model_path,
+        n_ctx=N_CTX,
+        n_threads=max(1, (os.cpu_count() or 4) - 1),
+        verbose=False,
+        logits_all=True,  # we need logits at every position
     )
+    print(f"loaded in {time.time() - t0:.1f}s "
+          f"(vocab {llm.n_vocab()}, threads {llm.n_threads})", flush=True)
+    return llm
+
+
+def _logits_to_probs(logits):
+    """Convert a logits row to a normalized float32 probability array."""
+    # numerical-stable softmax
+    m = logits.max()
+    e = np.exp(logits - m, dtype=np.float64)
+    probs = e / e.sum()
+    probs = np.maximum(probs.astype(np.float32), 1e-7)
+    return (probs / probs.sum()).astype(np.float32)
 
 
 def compress_text(text):
-    """Compress UTF-8 text. Returns bytes of the .nnz format."""
+    """Compress UTF-8 text. Returns bytes of the v2 .nnz format."""
     _load_deps()
-    model, tokenizer, model_name = _load_model()
+    llm = _load_model()
 
-    tokens = tokenizer.encode(text)
+    tokens = llm.tokenize(text.encode("utf-8"))
     if not tokens:
         raise ValueError("empty input")
 
-    bos = (tokenizer.bos_token_id
-           if tokenizer.bos_token_id is not None
-           else tokenizer.eos_token_id)
+    bos = llm.token_bos() if llm.token_bos() != -1 else llm.token_eos()
 
     enc = constriction.stream.queue.RangeEncoder()
-    past = None
-    last_token = bos
+    llm.reset()
+    llm.eval([bos])
+    ctx_len = 1  # how many tokens we've evaluated, including bos
+
     t0 = time.time()
-
     for i, token in enumerate(tokens):
-        if _cache_length(past) >= MAX_CACHE:
-            past = _truncate_cache(past, KEEP_AFTER)
-        input_ids = torch.tensor([[last_token]])
-        with torch.no_grad():
-            out = model(input_ids, past_key_values=past, use_cache=True)
-            logits = out.logits[0, -1]
-            past = out.past_key_values
-
+        # logits at position ctx_len-1 = prediction for the next token
+        logits = np.asarray(llm.scores[ctx_len - 1], dtype=np.float32).copy()
         probs = _logits_to_probs(logits)
         dist = constriction.stream.model.Categorical(probs, perfect=False)
         enc.encode(token, dist)
-        last_token = token
+
+        # Add this token to the context (it becomes the "previous" for the next prediction)
+        if ctx_len >= MAX_CACHE:
+            # sliding window: reset, re-feed last KEEP_AFTER tokens then add current
+            tail = tokens[max(0, i - KEEP_AFTER + 1) : i + 1]
+            llm.reset()
+            llm.eval([bos] + list(tail))
+            ctx_len = 1 + len(tail)
+        else:
+            llm.eval([token])
+            ctx_len += 1
 
         if (i + 1) % 50 == 0 or i == len(tokens) - 1:
             elapsed = time.time() - t0
@@ -139,67 +133,61 @@ def compress_text(text):
                   f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
 
     payload = enc.get_compressed().tobytes()
-    model_bytes = model_name.encode("utf-8")
-    # Header: magic (4) + version (1) + model_name_len (1) + model_name + token_count (4)
-    header = (MAGIC
-              + bytes([VERSION, len(model_bytes)])
-              + model_bytes
-              + struct.pack(">I", len(tokens)))
+    header = MAGIC + bytes([VERSION]) + struct.pack(">I", len(tokens))
     return header + payload
 
 
 def decompress_bytes(data):
-    """Inverse of compress_text. Returns the original UTF-8 text."""
+    """Inverse of compress_text. Returns UTF-8 text."""
     _load_deps()
 
     if not data.startswith(MAGIC):
-        raise ValueError("not an nnzip file (missing magic bytes)")
+        raise ValueError("not an nnzip file (missing magic)")
     pos = 4
     version = data[pos]; pos += 1
     if version != VERSION:
-        raise ValueError(f"unsupported nnzip version {version}")
-    name_len = data[pos]; pos += 1
-    model_name = data[pos:pos + name_len].decode("utf-8"); pos += name_len
+        raise ValueError(
+            f"unsupported nnzip file version {version} "
+            f"(this build handles v{VERSION}); "
+            f"reinstall the matching nnzip version to read this file"
+        )
     num_tokens = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
     payload = data[pos:]
 
-    if model_name != os.environ.get("NNZIP_MODEL", MODEL_NAME):
-        os.environ["NNZIP_MODEL"] = model_name  # ensure we load the right one
-
-    model, tokenizer, _ = _load_model()
-    bos = (tokenizer.bos_token_id
-           if tokenizer.bos_token_id is not None
-           else tokenizer.eos_token_id)
+    llm = _load_model()
+    bos = llm.token_bos() if llm.token_bos() != -1 else llm.token_eos()
 
     compressed = np.frombuffer(payload, dtype=np.uint32).copy()
     dec = constriction.stream.queue.RangeDecoder(compressed)
 
     decoded = []
-    past = None
-    last_token = bos
+    llm.reset()
+    llm.eval([bos])
+    ctx_len = 1
+
     t0 = time.time()
-
     for i in range(num_tokens):
-        if _cache_length(past) >= MAX_CACHE:
-            past = _truncate_cache(past, KEEP_AFTER)
-        input_ids = torch.tensor([[last_token]])
-        with torch.no_grad():
-            out = model(input_ids, past_key_values=past, use_cache=True)
-            logits = out.logits[0, -1]
-            past = out.past_key_values
-
+        logits = np.asarray(llm.scores[ctx_len - 1], dtype=np.float32).copy()
         probs = _logits_to_probs(logits)
         dist = constriction.stream.model.Categorical(probs, perfect=False)
         token = int(dec.decode(dist))
         decoded.append(token)
-        last_token = token
+
+        if ctx_len >= MAX_CACHE:
+            tail = decoded[-KEEP_AFTER:]
+            llm.reset()
+            llm.eval([bos] + list(tail))
+            ctx_len = 1 + len(tail)
+        else:
+            llm.eval([token])
+            ctx_len += 1
 
         if (i + 1) % 50 == 0 or i == num_tokens - 1:
             elapsed = time.time() - t0
             print(f"  decoded {i+1}/{num_tokens} tokens "
                   f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
 
-    return tokenizer.decode(decoded)
+    return llm.detokenize(decoded).decode("utf-8", errors="replace")
 
 
 EXTENSION = ".nnz"
@@ -249,23 +237,17 @@ def decompress_file(input_path, output_path=None):
 # ----- CLI entry points -----
 
 def main(argv=None):
-    """The `nnzip` command with subcommands."""
     parser = argparse.ArgumentParser(
         prog="nnzip",
-        description="LLM-based text compression (uses local GPT-2).",
+        description="LLM-based text compression (local GPT-2 via llama.cpp).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-
     p1 = sub.add_parser("compress", help="compress a text file")
     p1.add_argument("input")
-    p1.add_argument("output", nargs="?", default=None,
-                    help="default: <input>.nnz")
-
+    p1.add_argument("output", nargs="?", default=None)
     p2 = sub.add_parser("decompress", help="decompress an .nnz file")
     p2.add_argument("input")
-    p2.add_argument("output", nargs="?", default=None,
-                    help="default: strip .nnz from input")
-
+    p2.add_argument("output", nargs="?", default=None)
     args = parser.parse_args(argv)
     if args.cmd == "compress":
         compress_file(args.input, args.output)
@@ -274,27 +256,23 @@ def main(argv=None):
 
 
 def compress_main(argv=None):
-    """The bare `compress` command."""
     parser = argparse.ArgumentParser(
         prog="compress",
-        description="Compress a text file with nnzip (local GPT-2).",
+        description="Compress a text file with nnzip (local GPT-2 via llama.cpp).",
     )
     parser.add_argument("input")
-    parser.add_argument("output", nargs="?", default=None,
-                        help="default: <input>.nnz")
+    parser.add_argument("output", nargs="?", default=None)
     args = parser.parse_args(argv)
     compress_file(args.input, args.output)
 
 
 def decompress_main(argv=None):
-    """The bare `decompress` command."""
     parser = argparse.ArgumentParser(
         prog="decompress",
-        description="Decompress an .nnz file with nnzip (local GPT-2).",
+        description="Decompress an .nnz file with nnzip (local GPT-2 via llama.cpp).",
     )
     parser.add_argument("input")
-    parser.add_argument("output", nargs="?", default=None,
-                        help="default: strip .nnz from input")
+    parser.add_argument("output", nargs="?", default=None)
     args = parser.parse_args(argv)
     decompress_file(args.input, args.output)
 
