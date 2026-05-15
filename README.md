@@ -5,7 +5,7 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/nnzip)](https://pypi.org/project/nnzip/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A cross-platform CLI that compresses English text using a local GPT-2 as a probability model. On natural prose it gets around **15-25% of the original size** — typically 3-5× better than `gzip`.
+A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On natural English prose it lands around **15-25% of the original size** — typically 3-5× better than `gzip`.
 
 ```
 pip install nnzip
@@ -16,7 +16,7 @@ compress book.txt              # produces book.txt.nnz
 decompress book.txt.nnz        # restores book.txt
 ```
 
-Works on **macOS, Linux, and Windows**. No GPU required; uses [llama.cpp](https://github.com/ggerganov/llama.cpp) under the hood so it picks up Metal on Apple Silicon and AVX/CUDA elsewhere automatically.
+Works on **macOS, Linux, and Windows**. Uses [llama.cpp](https://github.com/ggerganov/llama.cpp) under the hood — runs on CPU by default, automatically uses Metal on Apple Silicon and CUDA on Linux if a compatible build is installed.
 
 ## What it actually does
 
@@ -24,54 +24,88 @@ When you compress a file, nnzip walks through it one token at a time. At each po
 
 If GPT-2 is 90% sure about the next token (the very common case in fluent English), encoding costs about 0.15 bits. If GPT-2 is totally surprised (1-in-50,000), it costs ~16 bits. The average across natural English ends up around 4-5 bits per token instead of the ~32 bits each token would take if stored naively.
 
-Decompression runs the same forward passes in the same order. Because GPT-2 is deterministic with greedy inference, both sides see identical probability distributions and the arithmetic coder unwinds back to the exact original token stream. The decompressed file is **bit-identical** to the original.
+Decompression runs the same forward passes in the same order. Both sides see identical probability distributions and the arithmetic coder unwinds back to the exact original token stream. The decompressed file is **bit-identical** to the original — and every `.nnz` carries a CRC32 of the original text in its header, which the decompressor verifies after decoding so silent corruption can't slip through.
 
-The compressed `.nnz` file contains zero model weights — just `MAGIC + version + token_count + arithmetic-coded payload`. Both ends rely on the same pinned GGUF model from Hugging Face, downloaded once to `~/.cache/huggingface/` on first use (~252 MB).
+The compressed `.nnz` file contains zero model weights — just a 15-byte header (`magic + version + lang + crc32 + token_count`) and the arithmetic-coded payload. Both ends rely on the same pinned GGUF model from Hugging Face, downloaded once to `~/.cache/huggingface/` on first use (~252 MB).
 
 ## Quick demo
 
 ```
-$ printf 'The morning rain pattered against the windows of the small cottage.' > demo.txt
+$ printf 'The morning rain pattered against the windows of the small cottage at the edge of the village. Margaret stirred her tea slowly.' > demo.txt
 $ wc -c demo.txt
-67 demo.txt
+130 demo.txt
 
 $ compress demo.txt
+detected language: en
 compressing demo.txt -> demo.txt.nnz
-loading openai-gpt2-124M-F16.gguf...
-loaded in 0.3s (vocab 50257, threads 9)
-  encoded 13/13 tokens (47.6 tok/s)
+loading nnzip-gpt2.gguf...
+loaded in 0.3s
+encoding: 100%|██████████| 130/130 [00:01<00:00, 1.02kB/s]
 
-original:    67 bytes
-compressed:  21 bytes (31.3% of original)
+✓ compressed in 1.4s
+  130 bytes → 32 bytes (24.6% of original)
 
 $ decompress demo.txt.nnz
-recovered 67 chars -> demo.txt
+decompressing demo.txt.nnz -> demo.txt
+✓ decompressed in 1.4s — integrity check ok
+  32 bytes → 130 bytes → demo.txt
 ```
 
 A 50 KB chunk of *Pride and Prejudice* lands at about 23% of the original (~11.5 KB). For comparison, `gzip -9` on the same input gets ~57%.
 
+Use `--stats` to see bits/token, model used, throughput, and the bits/byte number that compares directly to other compressors (gzip ≈ 2.5 bits/byte on English; nnzip ≈ 1.5-1.9).
+
 ## Performance and limits, plainly
 
-- **Speed.** Around 50 tokens/sec on an Apple M1 Max CPU. A 100 KB English file takes a couple of minutes to compress and another couple to decompress. This is slower than `gzip` by orders of magnitude. It is not a tool you'd use to compress your downloads folder.
-- **English-only is its sweet spot.** GPT-2 was trained on English internet text. Random binary, source code, non-English, base64-encoded blobs — these typically compress to 100%+ of the original (nnzip gives up and emits its escape encoding for everything). Don't use this on data that doesn't look like English prose.
-- **Lossless.** Provably. Arithmetic coding with a deterministic probability source round-trips bit-for-bit.
-- **GPT-2 has a 1024-token context window.** Past that, nnzip uses a sliding window of the last 512 tokens to predict the next one. Long-range compression suffers a little after the first ~1000 tokens, but it still works on arbitrarily large files.
-- **Cross-platform install, same-machine round-trip.** llama.cpp uses platform-specific acceleration (Metal on Mac, AVX on Linux/Windows, CUDA if available), and these can produce floating-point logits that differ in the last few bits across machines. Same machine that compressed should decompress. Same OS / CPU family is usually fine.
-- **No encryption.** Anyone with the same nnzip version can decompress a `.nnz` file. Use a real encryption tool on top if you need privacy.
+- **Speed.** On Apple Silicon (Metal) ≈ 1 KB/s. On CPU (Linux/Windows default install, or `NNZIP_NO_GPU=1`) ≈ 100 B/s. Either way, this is orders of magnitude slower than `gzip`. nnzip is not a tool for compressing your downloads folder; it's a tool for showing that a 124M-parameter language model beats classical compressors on prose.
+- **English is the sweet spot.** GPT-2 was trained on English internet text. Source code, non-English text, and random binary compress to 100%+ of the original — nnzip will warn you and suggest `gzip`. There's a multi-language framework in place (see "Other languages" below), but only an English model is published right now.
+- **Lossless.** Provably. The CRC32 stored in each `.nnz` is verified on decompress; if it doesn't match, you get a hard error (exit code 2), not silently wrong data.
+- **GPT-2 has a 1024-token context window.** Past that, nnzip uses a sliding window of the last 512 tokens to predict the next one. Long-range compression suffers a little after the first ~1000 tokens, but it works on arbitrarily large files.
+- **Cross-platform install; same-machine round-trip recommended.** llama.cpp's float results can differ in the last few bits between Metal/CUDA/AVX/different CPUs. Compressing on Mac and decompressing on Linux *might* desync. Same machine, or same backend, is reliable.
+- **No encryption.** Anyone with the same nnzip version can decompress a `.nnz`. Encrypt separately if you need privacy.
 
-## Why GPT-2 is a great compressor for English
+## CLI options
 
-Shannon's source coding theorem says you can't compress data below its entropy — the average number of bits needed per symbol given perfect prediction. For English text, the entropy is somewhere around 1.0-1.3 bits per character. Most classical compressors (gzip, bzip2, xz) approximate the entropy using simple statistical models — adjacent character frequencies, run-length, Lempel-Ziv pattern matching. Their best on plain English is around 25-30% of original.
+```
+compress [--stats] [--quiet] [--lang <code>] <input> [output]
+decompress [--stats] [--quiet] <input> [output]
+```
 
-GPT-2 is a much smarter model. It's seen billions of words and learned what's plausible at a phrase, sentence, and paragraph level. So when it predicts the next token, its distribution is sharper — closer to the data's true entropy. Sharper predictions mean fewer bits per symbol via arithmetic coding. That's all the trick is.
+| Flag | Effect |
+|---|---|
+| `--stats` | After the operation, print tokens, bits/token, bits/byte, model used, throughput |
+| `--quiet` / `-q` | Suppress progress output (for scripting) |
+| `--lang <code>` | Force a language (ISO 639-1, e.g. `en`, `fr`). Default: auto-detect |
+| `--version` | Print version and exit |
 
-Bigger models compress better still. DeepMind showed in [Language Modeling Is Compression](https://arxiv.org/abs/2309.10668) (2024) that Chinchilla 70B compresses Wikipedia to ~8% of original, beating every classical codec. The trade-off is obvious: bigger model, more compute. GPT-2 small (124M params, 252 MB) is a practical sweet spot — fast enough to actually use, small enough to ship via pip.
-
-## Optional tunables
+## Optional environment variables
 
 | Env var | Effect |
 |---|---|
 | `NNZIP_MODEL_PATH=/path/to/your.gguf` | Use a different GGUF model (any llama.cpp-compatible GPT-2 variant). Both sides need to use the same one. |
+| `NNZIP_NO_GPU=1` | Force CPU even on a machine with Metal/CUDA available. Useful for debugging cross-platform round-trip issues. |
+| `NO_COLOR=1` | Disable colored output (standard convention; see [no-color.org](https://no-color.org/)) |
+
+## Other languages
+
+The file format records the source language in its header, and the decompressor automatically picks the matching model from a registry. Adding a new language is *one line* in `nnzip/__init__.py`:
+
+```python
+LANG_REGISTRY = {
+    "en": ("eeeev1343/nnzip-gpt2-base-f16", "nnzip-gpt2.gguf"),
+    # "fr": ("eeeev1343/nnzip-gpt2-fr-f16",  "nnzip-gpt2-fr.gguf"),  # add here
+}
+```
+
+…assuming you've published a fine-tuned GPT-2 GGUF for that language on Hugging Face. Currently only English has a published model; non-English inputs auto-fall-back to the English model with a warning (the round-trip still works, the ratio is just worse).
+
+## Why GPT-2 is a great compressor for English
+
+Shannon's source coding theorem says you can't compress data below its entropy — the average number of bits needed per symbol given perfect prediction. For English text, the entropy is somewhere around 1.0-1.3 bits per character. Most classical compressors (gzip, bzip2, xz) approximate this with simple statistical models — adjacent character frequencies, run-length, Lempel-Ziv pattern matching. Their best on plain English is around 25-30% of original.
+
+GPT-2 is a much smarter model. It's seen billions of words and learned what's plausible at a phrase, sentence, and paragraph level. So when it predicts the next token, its distribution is sharper — closer to the data's true entropy. Sharper predictions mean fewer bits per symbol via arithmetic coding. That's all the trick is.
+
+Bigger models compress better still. DeepMind showed in [Language Modeling Is Compression](https://arxiv.org/abs/2309.10668) (2024) that Chinchilla 70B compresses Wikipedia to ~8% of original, beating every classical codec. The trade-off is obvious: bigger model, more compute. GPT-2 small (124M params, 252 MB) is a practical sweet spot — fast enough to actually use, small enough to ship via pip.
 
 ## What's in this repo
 
