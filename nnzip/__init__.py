@@ -194,16 +194,23 @@ def _load_model(lang=DEFAULT_LANG, verbose=True):
     if verbose:
         print(f"loading {os.path.basename(model_path)}...", flush=True)
     t0 = time.time()
+    # Offload all layers to GPU (Metal on Mac, CUDA on Linux+NVIDIA). For a
+    # 124M model this is trivial memory-wise (~250MB) and gives a real
+    # speedup over CPU. llama.cpp falls back to CPU automatically if the
+    # build doesn't support GPU. Override with NNZIP_NO_GPU=1 if needed.
+    n_gpu_layers = 0 if os.environ.get("NNZIP_NO_GPU") else -1
     llm = Llama(
         model_path=model_path,
         n_ctx=N_CTX,
         n_threads=max(1, (os.cpu_count() or 4) - 1),
+        n_gpu_layers=n_gpu_layers,
         verbose=False,
         logits_all=True,  # we need logits at every position
     )
     if verbose:
         print(f"loaded in {time.time() - t0:.1f}s "
-              f"(vocab {llm.n_vocab()}, threads {llm.n_threads})", flush=True)
+              f"(vocab {llm.n_vocab()}, threads {llm.n_threads}, "
+              f"gpu_layers {n_gpu_layers})", flush=True)
     return llm, effective_lang
 
 
