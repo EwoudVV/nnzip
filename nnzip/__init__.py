@@ -75,15 +75,17 @@ KEEP_AFTER = 512
 
 def _load_deps():
     """Lazy imports so `nnzip --help` doesn't pull in llama_cpp."""
-    global Llama, np, constriction, hf_hub_download
+    global Llama, np, constriction, hf_hub_download, tqdm
     from llama_cpp import Llama as _Llama
     import numpy as _np
     import constriction as _constriction
     from huggingface_hub import hf_hub_download as _hf_hub_download
+    from tqdm import tqdm as _tqdm
     Llama = _Llama
     np = _np
     constriction = _constriction
     hf_hub_download = _hf_hub_download
+    tqdm = _tqdm
 
 
 def detect_language(text):
@@ -176,7 +178,13 @@ def compress_text(text, lang=None, verbose=True):
     llm.eval([bos])
     ctx_len = 1  # how many tokens we've evaluated, including bos
 
-    t0 = time.time()
+    raw_bytes = text.encode("utf-8")
+    bytes_per_token = len(raw_bytes) / max(len(tokens), 1)
+    pbar = tqdm(
+        total=len(raw_bytes), unit="B", unit_scale=True, unit_divisor=1024,
+        desc="encoding", disable=not verbose, leave=False,
+    )
+
     for i, token in enumerate(tokens):
         # logits at position ctx_len-1 = prediction for the next token
         logits = np.asarray(llm.scores[ctx_len - 1], dtype=np.float32).copy()
@@ -194,11 +202,8 @@ def compress_text(text, lang=None, verbose=True):
         else:
             llm.eval([token])
             ctx_len += 1
-
-        if verbose and ((i + 1) % 50 == 0 or i == len(tokens) - 1):
-            elapsed = time.time() - t0
-            print(f"  encoded {i+1}/{len(tokens)} tokens "
-                  f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
+        pbar.update(bytes_per_token)
+    pbar.close()
 
     payload = enc.get_compressed().tobytes()
     raw_bytes = text.encode("utf-8")
@@ -253,7 +258,10 @@ def decompress_bytes(data, verbose=True):
     llm.eval([bos])
     ctx_len = 1
 
-    t0 = time.time()
+    pbar = tqdm(
+        total=num_tokens, unit="tok", desc="decoding",
+        disable=not verbose, leave=False,
+    )
     for i in range(num_tokens):
         logits = np.asarray(llm.scores[ctx_len - 1], dtype=np.float32).copy()
         probs = _logits_to_probs(logits)
@@ -269,11 +277,8 @@ def decompress_bytes(data, verbose=True):
         else:
             llm.eval([token])
             ctx_len += 1
-
-        if verbose and ((i + 1) % 50 == 0 or i == num_tokens - 1):
-            elapsed = time.time() - t0
-            print(f"  decoded {i+1}/{num_tokens} tokens "
-                  f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
+        pbar.update(1)
+    pbar.close()
 
     text = llm.detokenize(decoded).decode("utf-8", errors="replace")
 
