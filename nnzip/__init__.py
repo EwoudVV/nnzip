@@ -16,11 +16,19 @@ CLI:
     compress file.txt                # same as `nnzip compress`
     decompress file.txt.nnz          # same as `nnzip decompress`
 
-File format (v2):
+File format (v3, current):
+    4 bytes : magic "NNZP"
+    1 byte  : version (= 3)
+    2 bytes : lang code, ASCII (e.g. "en", "fr")
+    4 bytes : crc32 of original UTF-8 bytes (integrity check)
+    4 bytes : token_count (uint32 BE)
+    rest    : arithmetic-coded payload (uint32 words)
+
+File format (v2, still readable for backward compat):
     4 bytes : magic "NNZP"
     1 byte  : version (= 2)
     4 bytes : token_count (uint32 BE)
-    rest    : arithmetic-coded payload (uint32 words)
+    rest    : arithmetic-coded payload
 """
 
 import argparse
@@ -28,6 +36,7 @@ import os
 import struct
 import sys
 import time
+import zlib
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -36,13 +45,25 @@ except Exception:
     __version__ = "0.0.0+unknown"
 
 MAGIC = b"NNZP"
-VERSION = 2  # v1 used torch+transformers; v2 uses llama.cpp
+VERSION = 3  # v1: torch+transformers; v2: llama.cpp; v3: lang + crc32 in header
 
-# FP16 GGUF of OpenAI GPT-2 (124M params, ~252MB) on Hugging Face, mirrored
-# under the project's own account so the supply chain doesn't depend on a
-# third-party uploader. Both encoder and decoder must use the same model file.
-HF_REPO = "eeeev1343/nnzip-gpt2-base-f16"
-HF_FILE = "nnzip-gpt2.gguf"
+# Per-language model registry. Each entry maps an ISO-639-1 language code to
+# (HF repo, GGUF filename). Currently only English has a published model;
+# more languages get added by uploading new fine-tuned GGUFs and listing them
+# here. The package doesn't bundle any of them — they download lazily on first
+# use into ~/.cache/huggingface/ and stay cached.
+LANG_REGISTRY = {
+    "en": ("eeeev1343/nnzip-gpt2-base-f16", "nnzip-gpt2.gguf"),
+    # "fr": ("eeeev1343/nnzip-gpt2-fr-f16", "nnzip-gpt2-fr.gguf"),
+    # "de": ("eeeev1343/nnzip-gpt2-de-f16", "nnzip-gpt2-de.gguf"),
+    # etc — add as fine-tuned models are published.
+}
+DEFAULT_LANG = "en"
+
+
+class IntegrityError(Exception):
+    """Raised when the CRC32 stored in the .nnz header doesn't match the
+    CRC32 of the decompressed text. Indicates the round-trip failed."""
 
 # GPT-2 supports positions 0..1023. When the context hits MAX_CACHE we reset
 # and re-feed the last KEEP_AFTER tokens. Encoder and decoder do this at the
@@ -65,15 +86,47 @@ def _load_deps():
     hf_hub_download = _hf_hub_download
 
 
-def _load_model(verbose=True):
+def detect_language(text):
+    """Return an ISO 639-1 code for the text (e.g. 'en', 'fr'). Falls back to
+    DEFAULT_LANG if detection fails or langdetect is unavailable."""
+    try:
+        from langdetect import detect, DetectorFactory
+        DetectorFactory.seed = 0  # deterministic output
+        # 5000 chars is way more than enough for accurate detection
+        return detect(text[:5000])
+    except Exception:
+        return DEFAULT_LANG
+
+
+def _resolve_model_for_lang(lang, verbose=True):
+    """Pick the model for the requested language, falling back to English
+    with a warning if we don't have a fine-tuned model for that language yet.
+    Returns (effective_lang, repo, filename)."""
+    if lang in LANG_REGISTRY:
+        return (lang,) + LANG_REGISTRY[lang]
+    # Fallback: use English. Compression will still work, just less efficient
+    # for the non-English text.
+    if verbose:
+        print(
+            f"note: no fine-tuned model for {lang!r} yet — falling back to "
+            f"English. Ratio will be worse but the file will still round-trip.",
+            file=sys.stderr,
+        )
+    return (DEFAULT_LANG,) + LANG_REGISTRY[DEFAULT_LANG]
+
+
+def _load_model(lang=DEFAULT_LANG, verbose=True):
     override = os.environ.get("NNZIP_MODEL_PATH")
     if override:
+        # User pinned a specific GGUF; trust them, don't second-guess language
         model_path = override
+        effective_lang = lang
     else:
+        effective_lang, repo, filename = _resolve_model_for_lang(lang, verbose)
         if verbose:
-            print(f"resolving {HF_REPO}/{HF_FILE}... "
+            print(f"resolving {repo}/{filename}... "
                   f"(first run downloads ~250MB)", flush=True)
-        model_path = hf_hub_download(repo_id=HF_REPO, filename=HF_FILE)
+        model_path = hf_hub_download(repo_id=repo, filename=filename)
 
     if verbose:
         print(f"loading {os.path.basename(model_path)}...", flush=True)
@@ -88,7 +141,7 @@ def _load_model(verbose=True):
     if verbose:
         print(f"loaded in {time.time() - t0:.1f}s "
               f"(vocab {llm.n_vocab()}, threads {llm.n_threads})", flush=True)
-    return llm
+    return llm, effective_lang
 
 
 def _logits_to_probs(logits):
@@ -101,10 +154,16 @@ def _logits_to_probs(logits):
     return (probs / probs.sum()).astype(np.float32)
 
 
-def compress_text(text, verbose=True):
-    """Compress UTF-8 text. Returns bytes of the v2 .nnz format."""
+def compress_text(text, lang=None, verbose=True):
+    """Compress UTF-8 text. Returns bytes of the v3 .nnz format.
+
+    If `lang` is None, auto-detect from `text`. The chosen lang is stored in
+    the file header and used to pick the model on decompression.
+    """
     _load_deps()
-    llm = _load_model(verbose=verbose)
+    if lang is None:
+        lang = detect_language(text)
+    llm, effective_lang = _load_model(lang=lang, verbose=verbose)
 
     tokens = llm.tokenize(text.encode("utf-8"))
     if not tokens:
@@ -142,28 +201,48 @@ def compress_text(text, verbose=True):
                   f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
 
     payload = enc.get_compressed().tobytes()
-    header = MAGIC + bytes([VERSION]) + struct.pack(">I", len(tokens))
+    raw_bytes = text.encode("utf-8")
+    crc = zlib.crc32(raw_bytes) & 0xFFFFFFFF
+    lang_bytes = effective_lang.encode("ascii").ljust(2, b" ")[:2]
+    header = (
+        MAGIC
+        + bytes([VERSION])
+        + lang_bytes
+        + struct.pack(">I", crc)
+        + struct.pack(">I", len(tokens))
+    )
     return header + payload
 
 
 def decompress_bytes(data, verbose=True):
-    """Inverse of compress_text. Returns UTF-8 text."""
+    """Inverse of compress_text. Returns UTF-8 text.
+
+    Reads both v3 (current) and v2 (legacy) headers. v2 files are assumed to
+    be English and skip the CRC check.
+    """
     _load_deps()
 
     if not data.startswith(MAGIC):
         raise ValueError("not an nnzip file (missing magic)")
     pos = 4
     version = data[pos]; pos += 1
-    if version != VERSION:
+
+    if version == 3:
+        lang = data[pos:pos + 2].decode("ascii").rstrip(); pos += 2
+        expected_crc = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
+        num_tokens = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
+    elif version == 2:
+        lang = DEFAULT_LANG
+        expected_crc = None  # legacy file, no integrity check
+        num_tokens = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
+    else:
         raise ValueError(
             f"unsupported nnzip file version {version} "
-            f"(this build handles v{VERSION}); "
-            f"reinstall the matching nnzip version to read this file"
+            f"(this build handles v2 and v3)"
         )
-    num_tokens = struct.unpack(">I", data[pos:pos + 4])[0]; pos += 4
     payload = data[pos:]
 
-    llm = _load_model(verbose=verbose)
+    llm, _ = _load_model(lang=lang, verbose=verbose)
     bos = llm.token_bos() if llm.token_bos() != -1 else llm.token_eos()
 
     compressed = np.frombuffer(payload, dtype=np.uint32).copy()
@@ -196,7 +275,17 @@ def decompress_bytes(data, verbose=True):
             print(f"  decoded {i+1}/{num_tokens} tokens "
                   f"({(i+1)/max(elapsed,1e-9):.1f} tok/s)", flush=True)
 
-    return llm.detokenize(decoded).decode("utf-8", errors="replace")
+    text = llm.detokenize(decoded).decode("utf-8", errors="replace")
+
+    if expected_crc is not None:
+        actual_crc = zlib.crc32(text.encode("utf-8")) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            raise IntegrityError(
+                f"integrity check failed: stored crc32={expected_crc:08x}, "
+                f"decompressed crc32={actual_crc:08x}. The recovered text "
+                f"is probably wrong (model mismatch, file corruption, or a bug)."
+            )
+    return text
 
 
 EXTENSION = ".nnz"
@@ -214,7 +303,7 @@ def _resolve_output_for_decompress(input_path, output_path):
     return input_path + ".decompressed"
 
 
-def compress_file(input_path, output_path=None, quiet=False):
+def compress_file(input_path, output_path=None, quiet=False, lang=None):
     output_path = _resolve_output_for_compress(input_path, output_path)
     with open(input_path, "rb") as f:
         raw = f.read()
@@ -228,8 +317,13 @@ def compress_file(input_path, output_path=None, quiet=False):
         sys.exit(1)
 
     if not quiet:
+        if lang is None:
+            detected = detect_language(text)
+            print(f"detected language: {detected}", flush=True)
+        else:
+            print(f"language: {lang} (specified via --lang)", flush=True)
         print(f"compressing {input_path} -> {output_path}")
-    blob = compress_text(text, verbose=not quiet)
+    blob = compress_text(text, lang=lang, verbose=not quiet)
     with open(output_path, "wb") as f:
         f.write(blob)
     orig = len(raw)
@@ -259,11 +353,16 @@ def decompress_file(input_path, output_path=None, quiet=False):
         data = f.read()
     if not quiet:
         print(f"decompressing {input_path} -> {output_path}")
-    text = decompress_bytes(data, verbose=not quiet)
+    try:
+        text = decompress_bytes(data, verbose=not quiet)
+    except IntegrityError as e:
+        print(f"\nerror: {e}", file=sys.stderr)
+        sys.exit(2)
     with open(output_path, "wb") as f:
         f.write(text.encode("utf-8"))
     if not quiet:
         print(f"\nrecovered {len(text):,} chars -> {output_path}")
+        print("integrity check: ok (crc32 matches)")
     return output_path
 
 
@@ -272,6 +371,14 @@ def decompress_file(input_path, output_path=None, quiet=False):
 def _add_quiet(parser):
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="suppress progress output")
+
+
+def _add_lang(parser):
+    parser.add_argument(
+        "--lang", default=None,
+        help="ISO 639-1 language code (e.g. en, fr, ja). "
+             "If omitted, the language is auto-detected from the input.",
+    )
 
 
 def _version_flag(parser):
@@ -290,13 +397,14 @@ def main(argv=None):
     p1.add_argument("input")
     p1.add_argument("output", nargs="?", default=None)
     _add_quiet(p1)
+    _add_lang(p1)
     p2 = sub.add_parser("decompress", help="decompress an .nnz file")
     p2.add_argument("input")
     p2.add_argument("output", nargs="?", default=None)
     _add_quiet(p2)
     args = parser.parse_args(argv)
     if args.cmd == "compress":
-        compress_file(args.input, args.output, quiet=args.quiet)
+        compress_file(args.input, args.output, quiet=args.quiet, lang=args.lang)
     else:
         decompress_file(args.input, args.output, quiet=args.quiet)
 
@@ -310,8 +418,9 @@ def compress_main(argv=None):
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None)
     _add_quiet(parser)
+    _add_lang(parser)
     args = parser.parse_args(argv)
-    compress_file(args.input, args.output, quiet=args.quiet)
+    compress_file(args.input, args.output, quiet=args.quiet, lang=args.lang)
 
 
 def decompress_main(argv=None):
