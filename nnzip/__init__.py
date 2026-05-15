@@ -65,6 +65,61 @@ class IntegrityError(Exception):
     """Raised when the CRC32 stored in the .nnz header doesn't match the
     CRC32 of the decompressed text. Indicates the round-trip failed."""
 
+
+# ----- Color helpers -----
+# Follows https://no-color.org/: respect $NO_COLOR, and disable colors when
+# stdout isn't a TTY (e.g. piped to a file or running in CI).
+
+def _use_color():
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _color(text, code):
+    if _use_color():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def _green(text):  return _color(text, "32")
+def _red(text):    return _color(text, "31")
+def _yellow(text): return _color(text, "33")
+def _dim(text):    return _color(text, "2")
+def _bold(text):   return _color(text, "1")
+
+
+def _human_rate(bytes_per_sec):
+    """Auto-scale a byte rate to whichever unit reads naturally."""
+    if bytes_per_sec >= 1024 * 1024:
+        return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
+    if bytes_per_sec >= 1024:
+        return f"{bytes_per_sec / 1024:.2f} KB/s"
+    return f"{bytes_per_sec:.1f} B/s"
+
+
+# ----- Stats parsing -----
+
+def _parse_header(blob):
+    """Return a dict of header fields. Handles both v2 and v3."""
+    if not blob.startswith(MAGIC):
+        raise ValueError("not an nnzip blob")
+    version = blob[4]
+    if version == 3:
+        lang = blob[5:7].decode("ascii").rstrip()
+        token_count = struct.unpack(">I", blob[11:15])[0]
+        return {
+            "version": 3, "lang": lang, "token_count": token_count,
+            "header_size": 15,
+        }
+    if version == 2:
+        token_count = struct.unpack(">I", blob[5:9])[0]
+        return {
+            "version": 2, "lang": DEFAULT_LANG, "token_count": token_count,
+            "header_size": 9,
+        }
+    raise ValueError(f"unsupported version {version}")
+
 # GPT-2 supports positions 0..1023. When the context hits MAX_CACHE we reset
 # and re-feed the last KEEP_AFTER tokens. Encoder and decoder do this at the
 # same iteration, so they stay in sync.
@@ -308,14 +363,15 @@ def _resolve_output_for_decompress(input_path, output_path):
     return input_path + ".decompressed"
 
 
-def compress_file(input_path, output_path=None, quiet=False, lang=None):
+def compress_file(input_path, output_path=None, quiet=False, lang=None,
+                   stats=False):
     output_path = _resolve_output_for_compress(input_path, output_path)
     with open(input_path, "rb") as f:
         raw = f.read()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as e:
-        print(f"error: {input_path} is not valid UTF-8 text "
+        print(f"{_red('error:')} {input_path} is not valid UTF-8 text "
               f"(bad byte at position {e.start}).", file=sys.stderr)
         print("nnzip only compresses text. For binary, use gzip or zstd.",
               file=sys.stderr)
@@ -324,50 +380,106 @@ def compress_file(input_path, output_path=None, quiet=False, lang=None):
     if not quiet:
         if lang is None:
             detected = detect_language(text)
-            print(f"detected language: {detected}", flush=True)
+            print(f"detected language: {_bold(detected)}", flush=True)
         else:
-            print(f"language: {lang} (specified via --lang)", flush=True)
+            print(f"language: {_bold(lang)} (specified via --lang)", flush=True)
         print(f"compressing {input_path} -> {output_path}")
+
+    t0 = time.time()
     blob = compress_text(text, lang=lang, verbose=not quiet)
+    elapsed = time.time() - t0
+
     with open(output_path, "wb") as f:
         f.write(blob)
     orig = len(raw)
     comp = os.path.getsize(output_path)
+    ratio = comp / max(orig, 1)
+
     if not quiet:
+        if comp < orig:
+            mark = _green("✓")
+            ratio_text = _green(f"{100*ratio:.1f}%")
+        elif comp == orig:
+            mark = _yellow("=")
+            ratio_text = _yellow(f"{100*ratio:.1f}%")
+        else:
+            mark = _yellow("!")
+            ratio_text = _yellow(f"{100*ratio:.1f}%")
         print()
-        print(f"original:    {orig:,} bytes")
-        print(f"compressed:  {comp:,} bytes "
-              f"({100*comp/max(orig,1):.1f}% of original)")
+        print(f"{mark} compressed in {elapsed:.1f}s")
+        print(f"  {orig:,} bytes → {comp:,} bytes ({ratio_text} of original)")
+
     if comp >= orig:
-        print(
+        print(_yellow(
             f"warning: {output_path} ({comp:,} bytes) is larger than "
-            f"{input_path} ({orig:,} bytes).",
-            file=sys.stderr,
-        )
-        print(
+            f"{input_path} ({orig:,} bytes)."
+        ), file=sys.stderr)
+        print(_dim(
             "nnzip works best on natural English. For non-English / source "
-            "code / binary data, gzip or zstd will do better.",
-            file=sys.stderr,
-        )
+            "code / binary data, gzip or zstd will do better."
+        ), file=sys.stderr)
+
+    if stats and not quiet:
+        h = _parse_header(blob)
+        payload_bits = (len(blob) - h["header_size"]) * 8
+        bits_per_token = payload_bits / max(h["token_count"], 1)
+        bits_per_byte_input = 8 * comp / max(orig, 1)
+        print()
+        print(_bold("stats:"))
+        print(f"  tokens:           {h['token_count']:,}")
+        print(f"  bits/token:       {bits_per_token:.2f}")
+        print(f"  bits/byte (in):   {bits_per_byte_input:.2f}  "
+              f"{_dim('(gzip ≈ 2.5 on English, raw = 8.00)')}")
+        print(f"  file version:     v{h['version']}")
+        print(f"  source language:  {h['lang']}")
+        repo = LANG_REGISTRY.get(h['lang'], LANG_REGISTRY[DEFAULT_LANG])
+        print(f"  model:            {repo[0]}/{repo[1]}")
+        print(f"  encode speed:     {_human_rate(orig / max(elapsed,1e-9))}")
+
     return output_path
 
 
-def decompress_file(input_path, output_path=None, quiet=False):
+def decompress_file(input_path, output_path=None, quiet=False, stats=False):
     output_path = _resolve_output_for_decompress(input_path, output_path)
     with open(input_path, "rb") as f:
         data = f.read()
     if not quiet:
         print(f"decompressing {input_path} -> {output_path}")
+    t0 = time.time()
     try:
         text = decompress_bytes(data, verbose=not quiet)
     except IntegrityError as e:
-        print(f"\nerror: {e}", file=sys.stderr)
+        print(f"\n{_red('✗ integrity check failed:')} {e}", file=sys.stderr)
         sys.exit(2)
+    elapsed = time.time() - t0
     with open(output_path, "wb") as f:
         f.write(text.encode("utf-8"))
     if not quiet:
-        print(f"\nrecovered {len(text):,} chars -> {output_path}")
-        print("integrity check: ok (crc32 matches)")
+        print()
+        print(f"{_green('✓ decompressed in')} {elapsed:.1f}s "
+              f"{_green('— integrity check ok')}")
+        print(f"  {len(data):,} bytes → {len(text.encode('utf-8')):,} bytes → {output_path}")
+
+    if stats and not quiet:
+        h = _parse_header(data)
+        payload_bits = (len(data) - h["header_size"]) * 8
+        bits_per_token = payload_bits / max(h["token_count"], 1)
+        out_bytes = len(text.encode("utf-8"))
+        print()
+        print(_bold("stats:"))
+        print(f"  tokens:           {h['token_count']:,}")
+        print(f"  bits/token:       {bits_per_token:.2f}")
+        print(f"  file version:     v{h['version']}")
+        print(f"  source language:  {h['lang']}"
+              f"{'  (legacy v2, assumed)' if h['version'] == 2 else ''}")
+        repo = LANG_REGISTRY.get(h['lang'], LANG_REGISTRY[DEFAULT_LANG])
+        print(f"  model:            {repo[0]}/{repo[1]}")
+        print(f"  decode speed:     {_human_rate(out_bytes / max(elapsed,1e-9))}")
+        if h['version'] == 3:
+            print(f"  crc32 verified:   yes")
+        else:
+            print(f"  crc32 verified:   {_yellow('no')}  (v2 file, no CRC stored)")
+
     return output_path
 
 
@@ -386,6 +498,14 @@ def _add_lang(parser):
     )
 
 
+def _add_stats(parser):
+    parser.add_argument(
+        "--stats", action="store_true",
+        help="print extra stats after the operation (tokens, bits/token, "
+             "model used, speed).",
+    )
+
+
 def _version_flag(parser):
     parser.add_argument("--version", action="version",
                         version=f"nnzip {__version__}")
@@ -401,17 +521,18 @@ def main(argv=None):
     p1 = sub.add_parser("compress", help="compress a text file")
     p1.add_argument("input")
     p1.add_argument("output", nargs="?", default=None)
-    _add_quiet(p1)
-    _add_lang(p1)
+    _add_quiet(p1); _add_lang(p1); _add_stats(p1)
     p2 = sub.add_parser("decompress", help="decompress an .nnz file")
     p2.add_argument("input")
     p2.add_argument("output", nargs="?", default=None)
-    _add_quiet(p2)
+    _add_quiet(p2); _add_stats(p2)
     args = parser.parse_args(argv)
     if args.cmd == "compress":
-        compress_file(args.input, args.output, quiet=args.quiet, lang=args.lang)
+        compress_file(args.input, args.output, quiet=args.quiet,
+                      lang=args.lang, stats=args.stats)
     else:
-        decompress_file(args.input, args.output, quiet=args.quiet)
+        decompress_file(args.input, args.output, quiet=args.quiet,
+                        stats=args.stats)
 
 
 def compress_main(argv=None):
@@ -422,10 +543,10 @@ def compress_main(argv=None):
     _version_flag(parser)
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None)
-    _add_quiet(parser)
-    _add_lang(parser)
+    _add_quiet(parser); _add_lang(parser); _add_stats(parser)
     args = parser.parse_args(argv)
-    compress_file(args.input, args.output, quiet=args.quiet, lang=args.lang)
+    compress_file(args.input, args.output, quiet=args.quiet,
+                  lang=args.lang, stats=args.stats)
 
 
 def decompress_main(argv=None):
@@ -436,9 +557,10 @@ def decompress_main(argv=None):
     _version_flag(parser)
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None)
-    _add_quiet(parser)
+    _add_quiet(parser); _add_stats(parser)
     args = parser.parse_args(argv)
-    decompress_file(args.input, args.output, quiet=args.quiet)
+    decompress_file(args.input, args.output, quiet=args.quiet,
+                    stats=args.stats)
 
 
 if __name__ == "__main__":
