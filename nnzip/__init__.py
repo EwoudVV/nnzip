@@ -38,6 +38,12 @@ import sys
 import time
 import zlib
 
+# Suppress the "unauthenticated requests" warning huggingface_hub prints on
+# every download. nnzip only downloads a single pinned model from a public
+# repo; rate limits for that pattern are never an issue. We use setdefault so
+# users who do want HF authentication can still set their own value.
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN_WARNING", "1")
+
 try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("nnzip")
