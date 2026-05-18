@@ -5,7 +5,7 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/nnzip)](https://pypi.org/project/nnzip/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On natural English prose it lands around **15-25% of the original size** — typically 3-5× better than `gzip`.
+A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On natural prose it lands around **15-25% of the original size** — typically 3-5× better than `gzip`. Multi-language: English, Dutch, Italian, French, Portuguese, with auto-detection.
 
 ```
 pip install nnzip
@@ -58,7 +58,7 @@ Use `--stats` to see bits/token, model used, throughput, and the bits/byte numbe
 ## Performance and limits, plainly
 
 - **Speed.** On Apple Silicon (Metal) ≈ 1 KB/s. On CPU (Linux/Windows default install, or `NNZIP_NO_GPU=1`) ≈ 100 B/s. Either way, this is orders of magnitude slower than `gzip`. nnzip is not a tool for compressing your downloads folder; it's a tool for showing that a 124M-parameter language model beats classical compressors on prose.
-- **English is the sweet spot.** GPT-2 was trained on English internet text. Source code, non-English text, and random binary compress to 100%+ of the original — nnzip will warn you and suggest `gzip`. There's a multi-language framework in place (see "Other languages" below), but only an English model is published right now.
+- **Supported languages: English, Dutch, Italian, French, Portuguese.** Each uses a separate fine-tuned GPT-2 model that downloads on first use; the source language is auto-detected from the input. Other languages still work but fall back to the English model with a warning (so the ratio will be worse). Source code and random binary compress to 100%+ of the original — nnzip warns you and suggests `gzip` in that case.
 - **Lossless.** Provably. The CRC32 stored in each `.nnz` is verified on decompress; if it doesn't match, you get a hard error (exit code 2), not silently wrong data.
 - **GPT-2 has a 1024-token context window.** Past that, nnzip uses a sliding window of the last 512 tokens to predict the next one. Long-range compression suffers a little after the first ~1000 tokens, but it works on arbitrarily large files.
 - **Cross-platform install; same-machine round-trip recommended.** llama.cpp's float results can differ in the last few bits between Metal/CUDA/AVX/different CPUs. Compressing on Mac and decompressing on Linux *might* desync. Same machine, or same backend, is reliable.
@@ -86,18 +86,35 @@ decompress [--stats] [--quiet] <input> [output]
 | `NNZIP_NO_GPU=1` | Force CPU even on a machine with Metal/CUDA available. Useful for debugging cross-platform round-trip issues. |
 | `NO_COLOR=1` | Disable colored output (standard convention; see [no-color.org](https://no-color.org/)) |
 
-## Other languages
+## Languages
 
-The file format records the source language in its header, and the decompressor automatically picks the matching model from a registry. Adding a new language is *one line* in `nnzip/__init__.py`:
+The file format records the source language (ISO 639-1, 2 bytes) in its header, and the decompressor auto-picks the matching model from `LANG_REGISTRY`. Currently supported:
+
+| Code | Language | Model | Quality |
+|---|---|---|---|
+| `en` | English | own mirror of `openai/gpt2` | FP16 |
+| `nl` | Dutch | `RichardErkhov/GroNLP_-_gpt2-small-dutch-gguf` | Q6_K |
+| `it` | Italian | `RichardErkhov/GroNLP_-_gpt2-small-italian-gguf` | Q6_K |
+| `fr` | French | `RichardErkhov/mavuriRahul_-_french-gpt2-gguf` | Q8_0 |
+| `pt` | Portuguese | `PabloHoties/gpt2-small-portuguese-gguf` | FP16 |
+
+Inputs in other languages still compress — they auto-fall-back to the English model with a `note: no fine-tuned model for 'xx' yet` warning, the round-trip still works, the ratio is just worse than it would be with a language-matched model.
+
+### Adding a new language
+
+One line in `nnzip/__init__.py`:
 
 ```python
 LANG_REGISTRY = {
     "en": ("eeeev1343/nnzip-gpt2-base-f16", "nnzip-gpt2.gguf"),
-    # "fr": ("eeeev1343/nnzip-gpt2-fr-f16",  "nnzip-gpt2-fr.gguf"),  # add here
+    "de": ("your-hf-username/nnzip-gpt2-de", "model.gguf"),  # add here
+    ...
 }
 ```
 
-…assuming you've published a fine-tuned GPT-2 GGUF for that language on Hugging Face. Currently only English has a published model; non-English inputs auto-fall-back to the English model with a warning (the round-trip still works, the ratio is just worse).
+…assuming you've published (or found) a fine-tuned GPT-2 GGUF for that language on Hugging Face. The non-English models above are pointed at directly without mirroring; if you want supply-chain stability, fork them under your own account first.
+
+For converting an HF-format model to GGUF: llama.cpp ships a `convert_hf_to_gguf.py` script. Be warned that it's fragile — every individual model has its own quirks (legacy attention-mask tensors, vocab-size mismatches, unrecognized BPE pre-tokenizers). Plan an hour or two per model the first time.
 
 ## Why GPT-2 is a great compressor for English
 
