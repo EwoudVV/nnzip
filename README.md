@@ -5,7 +5,7 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/nnzip)](https://pypi.org/project/nnzip/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-![nnzip in action](docs/nnzip-demo.gif)
+![nnzip in action](https://raw.githubusercontent.com/EwoudVV/nnzip/main/docs/nnzip-demo.gif)
 
 A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On natural prose it lands around **15-25% of the original size** — typically 3-5× better than `gzip`. Multi-language: English, Dutch, Italian, French, Portuguese, with auto-detection.
 
