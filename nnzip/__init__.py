@@ -59,10 +59,27 @@ VERSION = 3  # v1: torch+transformers; v2: llama.cpp; v3: lang + crc32 in header
 # here. The package doesn't bundle any of them — they download lazily on first
 # use into ~/.cache/huggingface/ and stay cached.
 LANG_REGISTRY = {
+    # English: our own mirror of an FP16 GGUF
     "en": ("eeeev1343/nnzip-gpt2-base-f16", "nnzip-gpt2.gguf"),
-    # "fr": ("eeeev1343/nnzip-gpt2-fr-f16", "nnzip-gpt2-fr.gguf"),
-    # "de": ("eeeev1343/nnzip-gpt2-de-f16", "nnzip-gpt2-de.gguf"),
-    # etc — add as fine-tuned models are published.
+    # Other languages: pointing at existing third-party GGUFs on HF (no
+    # mirroring — we depend on these repos staying online). Each GGUF is the
+    # highest-quality (smallest quantization error) variant available in its
+    # source repo: F16 > Q8_0 > Q6_K. Mixed because not every uploader
+    # published F16.
+    "nl": ("RichardErkhov/GroNLP_-_gpt2-small-dutch-gguf",
+           "gpt2-small-dutch.Q6_K.gguf"),
+    "it": ("RichardErkhov/GroNLP_-_gpt2-small-italian-gguf",
+           "gpt2-small-italian.Q6_K.gguf"),
+    "fr": ("RichardErkhov/mavuriRahul_-_french-gpt2-gguf",
+           "french-gpt2.Q8_0.gguf"),
+    "pt": ("PabloHoties/gpt2-small-portuguese-gguf",
+           "gpt2-small-portuguese-f16.gguf"),
+    # Future: Spanish, German, Japanese, Chinese, Korean — these need
+    # converting from HF format to GGUF first. The llama.cpp convert script
+    # is fragile (different quirks per source model: legacy attention mask
+    # tensors, vocab-size mismatches, unrecognized BPE pre-tokenizers), so
+    # each one needs ad-hoc patching. Skip for now; add later when willing
+    # to fight the tooling per model.
 }
 DEFAULT_LANG = "en"
 
