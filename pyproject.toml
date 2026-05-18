@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nnzip"
-version = "1.2.0"
+version = "1.2.1"
 description = "Cross-platform text compression that uses a local GPT-2 (via llama.cpp) as the probability model."
 readme = "README.md"
 license = { file = "LICENSE" }

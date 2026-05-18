@@ -32,6 +32,7 @@ File format (v2, still readable for backward compat):
 """
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -110,6 +111,41 @@ def _red(text):    return _color(text, "31")
 def _yellow(text): return _color(text, "33")
 def _dim(text):    return _color(text, "2")
 def _bold(text):   return _color(text, "1")
+
+
+def _print_token_breakdown(token_log):
+    """Render the per-token table emitted by --show-tokens."""
+    if not token_log:
+        return
+    print()
+    print(_bold("token-level breakdown:"))
+    print(f"  {'#':>4}  {'token':<22} {'P(actual)':>10}  {'bits':>6}  bar")
+    total_bits = 0.0
+    for i, (s, p, b) in enumerate(token_log):
+        total_bits += b
+        bar_len = min(int(round(b)), 24)
+        bar = "█" * bar_len
+        if b < 2:
+            bar_colored = _green(bar)
+            bits_text = _green(f"{b:>6.2f}")
+        elif b < 6:
+            bar_colored = bar
+            bits_text = f"{b:>6.2f}"
+        elif b < 12:
+            bar_colored = _yellow(bar)
+            bits_text = _yellow(f"{b:>6.2f}")
+        else:
+            bar_colored = _red(bar)
+            bits_text = _red(f"{b:>6.2f}")
+        # repr() makes whitespace and special chars visible
+        display = repr(s)
+        if len(display) > 22:
+            display = display[:21] + "…"
+        print(f"  {i:>4}  {display:<22} {p:>10.4f}  {bits_text}  {bar_colored}")
+    avg = total_bits / max(len(token_log), 1)
+    print()
+    print(f"  total: {total_bits:.1f} bits across {len(token_log)} tokens "
+          f"({avg:.2f} bits/token avg)")
 
 
 def _human_rate(bytes_per_sec):
@@ -241,11 +277,14 @@ def _logits_to_probs(logits):
     return (probs / probs.sum()).astype(np.float32)
 
 
-def compress_text(text, lang=None, verbose=True):
+def compress_text(text, lang=None, verbose=True, show_tokens=False):
     """Compress UTF-8 text. Returns bytes of the v3 .nnz format.
 
     If `lang` is None, auto-detect from `text`. The chosen lang is stored in
     the file header and used to pick the model on decompression.
+
+    If `show_tokens` is True, also print a per-token breakdown after encoding
+    (how confident the model was about each token and how many bits it cost).
     """
     _load_deps()
     if lang is None:
@@ -255,6 +294,8 @@ def compress_text(text, lang=None, verbose=True):
     tokens = llm.tokenize(text.encode("utf-8"))
     if not tokens:
         raise ValueError("empty input")
+
+    token_log = [] if show_tokens else None
 
     bos = llm.token_bos() if llm.token_bos() != -1 else llm.token_eos()
 
@@ -274,6 +315,11 @@ def compress_text(text, lang=None, verbose=True):
         # logits at position ctx_len-1 = prediction for the next token
         logits = np.asarray(llm.scores[ctx_len - 1], dtype=np.float32).copy()
         probs = _logits_to_probs(logits)
+        if show_tokens:
+            p_actual = float(probs[token])
+            bits = -math.log2(p_actual) if p_actual > 0 else float("inf")
+            tok_str = llm.detokenize([token]).decode("utf-8", errors="replace")
+            token_log.append((tok_str, p_actual, bits))
         dist = constriction.stream.model.Categorical(probs, perfect=False)
         enc.encode(token, dist)
 
@@ -289,6 +335,9 @@ def compress_text(text, lang=None, verbose=True):
             ctx_len += 1
         pbar.update(bytes_per_token)
     pbar.close()
+
+    if show_tokens and verbose:
+        _print_token_breakdown(token_log)
 
     payload = enc.get_compressed().tobytes()
     raw_bytes = text.encode("utf-8")
@@ -394,7 +443,7 @@ def _resolve_output_for_decompress(input_path, output_path):
 
 
 def compress_file(input_path, output_path=None, quiet=False, lang=None,
-                   stats=False):
+                   stats=False, show_tokens=False):
     output_path = _resolve_output_for_compress(input_path, output_path)
     with open(input_path, "rb") as f:
         raw = f.read()
@@ -416,7 +465,8 @@ def compress_file(input_path, output_path=None, quiet=False, lang=None,
         print(f"compressing {input_path} -> {output_path}")
 
     t0 = time.time()
-    blob = compress_text(text, lang=lang, verbose=not quiet)
+    blob = compress_text(text, lang=lang, verbose=not quiet,
+                          show_tokens=show_tokens)
     elapsed = time.time() - t0
 
     with open(output_path, "wb") as f:
@@ -536,6 +586,15 @@ def _add_stats(parser):
     )
 
 
+def _add_show_tokens(parser):
+    parser.add_argument(
+        "--show-tokens", action="store_true",
+        help="after compressing, print a per-token breakdown with the "
+             "probability the model assigned to each actual token and the "
+             "bits spent encoding it.",
+    )
+
+
 def _version_flag(parser):
     parser.add_argument("--version", action="version",
                         version=f"nnzip {__version__}")
@@ -551,7 +610,7 @@ def main(argv=None):
     p1 = sub.add_parser("compress", help="compress a text file")
     p1.add_argument("input")
     p1.add_argument("output", nargs="?", default=None)
-    _add_quiet(p1); _add_lang(p1); _add_stats(p1)
+    _add_quiet(p1); _add_lang(p1); _add_stats(p1); _add_show_tokens(p1)
     p2 = sub.add_parser("decompress", help="decompress an .nnz file")
     p2.add_argument("input")
     p2.add_argument("output", nargs="?", default=None)
@@ -559,7 +618,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.cmd == "compress":
         compress_file(args.input, args.output, quiet=args.quiet,
-                      lang=args.lang, stats=args.stats)
+                      lang=args.lang, stats=args.stats,
+                      show_tokens=args.show_tokens)
     else:
         decompress_file(args.input, args.output, quiet=args.quiet,
                         stats=args.stats)
@@ -573,10 +633,11 @@ def compress_main(argv=None):
     _version_flag(parser)
     parser.add_argument("input")
     parser.add_argument("output", nargs="?", default=None)
-    _add_quiet(parser); _add_lang(parser); _add_stats(parser)
+    _add_quiet(parser); _add_lang(parser); _add_stats(parser); _add_show_tokens(parser)
     args = parser.parse_args(argv)
     compress_file(args.input, args.output, quiet=args.quiet,
-                  lang=args.lang, stats=args.stats)
+                  lang=args.lang, stats=args.stats,
+                  show_tokens=args.show_tokens)
 
 
 def decompress_main(argv=None):
