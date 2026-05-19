@@ -7,7 +7,7 @@
 
 ![nnzip in action](https://raw.githubusercontent.com/EwoudVV/nnzip/main/docs/nnzip-demo.gif)
 
-A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On natural prose it lands around **15-25% of the original size** — typically 3-5× better than `gzip`. Multi-language: English, Dutch, Italian, French, Portuguese, with auto-detection.
+A cross-platform CLI that compresses text using a local GPT-2 as a probability model. On clean prose it lands around **10-15% of the original size** — roughly 4× better than `gzip`. Multi-language: English, Dutch, Italian, French, Portuguese, with auto-detection.
 
 ```
 pip install nnzip
@@ -53,14 +53,38 @@ decompressing demo.txt.nnz -> demo.txt
   32 bytes → 130 bytes → demo.txt
 ```
 
-A 50 KB chunk of *Pride and Prejudice* lands at about 23% of the original (~11.5 KB). For comparison, `gzip -9` on the same input gets ~57%.
+Use `--stats` to see bits/token, model used, throughput, and the bits/byte number that compares directly to other compressors (gzip ≈ 3-4 bits/byte on English prose; nnzip ≈ 0.9-1.2).
 
-Use `--stats` to see bits/token, model used, throughput, and the bits/byte number that compares directly to other compressors (gzip ≈ 2.5 bits/byte on English; nnzip ≈ 1.5-1.9).
+## Benchmarks
+
+A small corpus of clean ASCII text (no BOM, no `\r\n`, no smart quotes — see [`benchmarks/corpus/`](benchmarks/corpus/)) run through every compressor at its highest standard setting. nnzip wins every category, including the ones I expected it to lose (code, JSON, highly repetitive text).
+
+| File | Type | Original | gzip -9 | bzip2 -9 | xz -9e | zstd -22 | **nnzip** |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `prose_modern.txt` | Modern English prose | 2,295 | 1,126 (49.1%) | 1,107 (48.2%) | 1,256 (54.7%) | 1,122 (48.9%) | **283 (12.3%)** |
+| `wiki_factual.txt` | Wikipedia-style factual | 2,521 | 1,262 (50.1%) | 1,238 (49.1%) | 1,376 (54.6%) | 1,247 (49.5%) | **287 (11.4%)** |
+| `dialogue.txt` | Fiction dialogue | 1,876 | 942 (50.2%) | 921 (49.1%) | 1,056 (56.3%) | 933 (49.7%) | **251 (13.4%)** |
+| `markdown_docs.md` | Markdown documentation | 2,166 | 1,037 (47.9%) | 1,090 (50.3%) | 1,148 (53.0%) | 1,032 (47.6%) | **251 (11.6%)** |
+| `code_python.py` | Python source code | 2,251 | 761 (33.8%) | 795 (35.3%) | 848 (37.7%) | 755 (33.5%) | **343 (15.2%)** |
+| `json_data.json` | JSON data | 1,935 | 644 (33.3%) | 705 (36.4%) | 688 (35.6%) | 639 (33.0%) | **175 (9.0%)** |
+| `repetitive.txt` | Highly repetitive text | 1,350 | 77 (5.7%) | 125 (9.3%) | 132 (9.8%) | 67 (5.0%) | **27 (2.0%)** |
+| **Total** | — | **14,394** | **5,849 (40.6%)** | **5,981 (41.6%)** | **6,504 (45.2%)** | **5,795 (40.3%)** | **1,617 (11.2%)** |
+
+For reference, Shannon's estimated entropy of English is ~1 bit per byte. nnzip reaches **0.9-1.1 bpb on clean prose** because GPT-2 has actually learned the language statistics; gzip stays at 3-4 bpb because it's pattern-matching on bytes.
+
+Two caveats:
+- **`xz` looks bad here only because the files are tiny.** xz's larger dictionary overhead doesn't pay off below ~10 KB. On bigger inputs it closes the gap with gzip/zstd, but still loses to nnzip on prose.
+- **Dirty text hurts nnzip a lot.** A 50 KB chunk of *Pride and Prejudice* straight from Project Gutenberg (BOM, Windows line endings, smart quotes, all-caps legal text) lands at ~23% instead of the ~12% you see on clean prose — every `\r` byte costs ~23 bits because GPT-2 essentially never saw one in training. Run `dos2unix` first for a big win.
+
+Reproduce with:
+```
+python3 benchmarks/run_benchmarks.py
+```
 
 ## Performance and limits, plainly
 
 - **Speed.** On Apple Silicon (Metal) ≈ 1 KB/s. On CPU (Linux/Windows default install, or `NNZIP_NO_GPU=1`) ≈ 100 B/s. Either way, this is orders of magnitude slower than `gzip`. nnzip is not a tool for compressing your downloads folder; it's a tool for showing that a 124M-parameter language model beats classical compressors on prose.
-- **Supported languages: English, Dutch, Italian, French, Portuguese.** Each uses a separate fine-tuned GPT-2 model that downloads on first use; the source language is auto-detected from the input. Other languages still work but fall back to the English model with a warning (so the ratio will be worse). Source code and random binary compress to 100%+ of the original — nnzip warns you and suggests `gzip` in that case.
+- **Supported languages: English, Dutch, Italian, French, Portuguese.** Each uses a separate fine-tuned GPT-2 model that downloads on first use; the source language is auto-detected from the input. Other languages still work but fall back to the English model with a warning (so the ratio will be worse). Random binary data compresses to 100%+ of the original — nnzip warns you and suggests `gzip` in that case.
 - **Lossless.** Provably. The CRC32 stored in each `.nnz` is verified on decompress; if it doesn't match, you get a hard error (exit code 2), not silently wrong data.
 - **GPT-2 has a 1024-token context window.** Past that, nnzip uses a sliding window of the last 512 tokens to predict the next one. Long-range compression suffers a little after the first ~1000 tokens, but it works on arbitrarily large files.
 - **Cross-platform install; same-machine round-trip recommended.** llama.cpp's float results can differ in the last few bits between Metal/CUDA/AVX/different CPUs. Compressing on Mac and decompressing on Linux *might* desync. Same machine, or same backend, is reliable.
